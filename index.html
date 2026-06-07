@@ -1,0 +1,2841 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Shadow — Splat Shadow Brush</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
+  <style>
+    /* ---------- Design tokens ------------------------------------------ */
+    :root {
+      --bg-0:        #08080c;
+      --bg-1:        #0d0d14;
+      --bg-2:        #14141d;
+      --surface:     rgba(20, 20, 28, 0.72);
+      --surface-hi:  rgba(34, 34, 46, 0.85);
+      --border:      rgba(255, 255, 255, 0.07);
+      --border-hi:   rgba(255, 255, 255, 0.14);
+      --text:        #e9eaf1;
+      --text-mute:   #9aa0b3;
+      --text-dim:    #5f6478;
+      --accent:      #f4b860;     /* warm amber */
+      --accent-hi:   #ffd28a;
+      --accent-soft: rgba(244, 184, 96, 0.16);
+      --shadow-mode: #f4b860;
+      --undo-mode:   #7aa7ff;
+      --orbit-mode:  #9aa0b3;
+      --shadow-lg:   0 20px 60px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.4);
+      --shadow-md:   0 8px 24px rgba(0,0,0,0.45);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    /* Prevent accidental HTML5 drags on UI chrome — the file dropzone
+       should only open for OS file drags, not in-page text/image drags. */
+    body > :not(#dropzone), body > :not(#dropzone) * {
+      -webkit-user-drag: none;
+      user-select: none;
+    }
+    #dropzone, #dropzone * { user-select: none; }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      width: 100%;
+      background: var(--bg-0);
+      color: var(--text);
+      font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-feature-settings: "ss01", "cv11";
+      -webkit-font-smoothing: antialiased;
+      overflow: hidden;
+    }
+
+    /* Soft vignette + ambient gradient to add depth behind the splat. */
+    body::before {
+      content: "";
+      position: fixed; inset: 0;
+      background:
+        radial-gradient(900px 600px at 18% 12%, rgba(244,184,96,0.10), transparent 60%),
+        radial-gradient(1100px 700px at 82% 88%, rgba(122,167,255,0.08), transparent 60%),
+        radial-gradient(120% 90% at 50% 50%, transparent 50%, rgba(0,0,0,0.55) 100%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    #canvas {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      outline: none;
+      touch-action: none;
+      cursor: grab;
+      z-index: 1;
+    }
+    #canvas.painting           { cursor: crosshair; }
+    #canvas.painting:active    { cursor: crosshair; }
+    #canvas:active             { cursor: grabbing; }
+
+    /* ---------- Top header (brand + mode switcher) ---------------------- */
+    .ui-layer { position: absolute; z-index: 10; }
+    .glass {
+      background: var(--surface);
+      backdrop-filter: blur(18px) saturate(140%);
+      -webkit-backdrop-filter: blur(18px) saturate(140%);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-md);
+      border-radius: 14px;
+    }
+
+    #brand {
+      top: 18px;
+      left: 18px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px 8px 10px;
+      border-radius: 999px;
+      pointer-events: none;
+      user-select: none;
+    }
+    #brand .dot {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 30% 30%, var(--accent-hi), var(--accent) 55%, #6e4f1f 100%);
+      box-shadow:
+        0 0 0 2px rgba(244,184,96,0.18),
+        0 4px 12px rgba(244,184,96,0.35);
+    }
+    #brand .name {
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      font-size: 14px;
+    }
+    #brand .name span { color: var(--text-mute); font-weight: 500; }
+
+    #mode-bar {
+      top: 18px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      padding: 4px;
+      gap: 2px;
+      border-radius: 999px;
+    }
+    .mode-btn {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-mute);
+      background: transparent;
+      border: 0;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: color 0.15s ease, background 0.15s ease, transform 0.05s ease;
+      letter-spacing: 0.01em;
+    }
+    .mode-btn:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+    .mode-btn:active { transform: translateY(1px); }
+    .mode-btn .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: currentColor;
+      opacity: 0.55;
+      box-shadow: 0 0 0 0 currentColor;
+      transition: box-shadow 0.25s ease, opacity 0.15s ease;
+    }
+    .mode-btn kbd {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 10px;
+      color: var(--text-dim);
+      background: rgba(255,255,255,0.06);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 5px;
+      margin-left: 2px;
+    }
+    .mode-btn.active {
+      color: #0b0b10;
+      background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(220,220,228,0.92));
+      box-shadow: 0 4px 14px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.5);
+    }
+    .mode-btn.active kbd { color: rgba(11,11,16,0.6); background: rgba(0,0,0,0.06); border-color: rgba(0,0,0,0.1); }
+    .mode-btn.active[data-mode="shadow"] { background: linear-gradient(180deg, #ffd28a, #f4b860); color: #1c1404; }
+    .mode-btn.active[data-mode="shadow"] .dot { background: #1c1404; opacity: 0.9; }
+    .mode-btn.active[data-mode="undo"]   { background: linear-gradient(180deg, #a8c2ff, #7aa7ff); color: #06122e; }
+    .mode-btn.active[data-mode="undo"]   .dot { background: #06122e; opacity: 0.9; }
+    .mode-btn[data-mode="shadow"] .dot { color: var(--shadow-mode); background: var(--shadow-mode); }
+    .mode-btn[data-mode="undo"]   .dot { color: var(--undo-mode);   background: var(--undo-mode); }
+    .mode-btn[data-mode="view"]   .dot { color: var(--orbit-mode);  background: var(--orbit-mode); }
+    .mode-btn[disabled] {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
+    .mode-btn[disabled]:hover { background: transparent; color: var(--text-mute); }
+
+    /* ---------- Toast (mode change feedback) --------------------------- */
+    #mode-overlay {
+      bottom: 96px;
+      left: 50%;
+      transform: translateX(-50%) translateY(8px);
+      padding: 10px 18px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text);
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+    }
+    #mode-overlay.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    /* ---------- Loading indicator -------------------------------------- */
+    #loading {
+      position: absolute;
+      inset: 0;
+      z-index: 5;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
+      pointer-events: none;
+      background: radial-gradient(ellipse at center, rgba(11,11,16,0) 30%, rgba(11,11,16,0.6));
+    }
+    #loading.hidden { display: none; }
+    #loading .ring {
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      border: 2px solid rgba(255,255,255,0.08);
+      border-top-color: var(--accent);
+      animation: spin 0.9s cubic-bezier(0.6, 0, 0.4, 1) infinite;
+    }
+    #loading .label {
+      font-size: 11px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--text-mute);
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ---------- Drop zone hero ----------------------------------------- */
+    #dropzone {
+      position: absolute;
+      inset: 0;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 32px;
+      background:
+        radial-gradient(ellipse at center, rgba(20,20,30,0.3), rgba(8,8,12,0.92));
+      transition: background 0.2s ease;
+    }
+    #dropzone.hidden { display: none; }
+    #dropzone .card {
+      position: relative;
+      padding: 44px 48px;
+      width: min(520px, 92vw);
+      text-align: center;
+      border-radius: 20px;
+      background: linear-gradient(180deg, rgba(28,28,38,0.8), rgba(14,14,22,0.85));
+      border: 1px solid var(--border-hi);
+      box-shadow: var(--shadow-lg);
+      overflow: hidden;
+    }
+    #dropzone .card::before {
+      content: "";
+      position: absolute; inset: 0;
+      background:
+        radial-gradient(400px 200px at 50% -10%, rgba(244,184,96,0.18), transparent 70%),
+        radial-gradient(300px 200px at 50% 110%, rgba(122,167,255,0.10), transparent 70%);
+      pointer-events: none;
+    }
+    #dropzone.dragover .card {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 4px var(--accent-soft), var(--shadow-lg);
+      transform: scale(1.01);
+    }
+    #dropzone .card > * { position: relative; }
+    #dropzone .glyph {
+      width: 56px; height: 56px;
+      margin: 0 auto 18px;
+      border-radius: 16px;
+      display: grid;
+      place-items: center;
+      background: linear-gradient(180deg, rgba(244,184,96,0.18), rgba(244,184,96,0.06));
+      border: 1px solid rgba(244,184,96,0.35);
+      box-shadow: 0 8px 24px rgba(244,184,96,0.18);
+    }
+    #dropzone .glyph svg { width: 28px; height: 28px; color: var(--accent-hi); }
+    #dropzone .title {
+      font-size: 32px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      background: linear-gradient(180deg, #ffffff, #c8cad4);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      margin-bottom: 6px;
+    }
+    #dropzone .subtitle {
+      font-size: 14px;
+      color: var(--text-mute);
+      max-width: 380px;
+      margin: 0 auto 24px;
+      line-height: 1.55;
+    }
+    #dropzone .formats {
+      display: inline-flex; flex-wrap: wrap; justify-content: center; gap: 6px;
+      margin-bottom: 22px;
+    }
+    #dropzone .formats code {
+      font-family: "JetBrains Mono", ui-monospace, monospace;
+      font-size: 11px;
+      color: var(--text);
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid var(--border);
+    }
+    #dropzone .browse {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 22px;
+      border-radius: 12px;
+      background: linear-gradient(180deg, var(--accent-hi), var(--accent));
+      color: #1c1404;
+      font: inherit;
+      font-weight: 600;
+      font-size: 14px;
+      cursor: pointer;
+      border: 1px solid rgba(0,0,0,0.15);
+      box-shadow:
+        0 8px 24px rgba(244,184,96,0.28),
+        inset 0 1px 0 rgba(255,255,255,0.4);
+      transition: transform 0.08s ease, box-shadow 0.2s ease, filter 0.15s ease;
+    }
+    #dropzone .browse:hover  { filter: brightness(1.04); box-shadow: 0 12px 32px rgba(244,184,96,0.34), inset 0 1px 0 rgba(255,255,255,0.5); }
+    #dropzone .browse:active { transform: translateY(1px); }
+    #dropzone .hint {
+      margin-top: 16px;
+      font-size: 11px;
+      color: var(--text-dim);
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    /* ---------- Objects panel ----------------------------------------- */
+    #objects-panel {
+      top: 70px;
+      left: 18px;
+      width: 240px;
+      padding: 10px 10px 8px;
+      font-size: 12px;
+      color: var(--text-mute);
+      pointer-events: auto;
+      user-select: none;
+    }
+    #objects-panel.hidden { display: none; }
+    #objects-panel .panel-label {
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      padding: 4px 6px 8px;
+    }
+    #gizmo-toolbar {
+      display: flex;
+      gap: 2px;
+      padding: 3px;
+      margin-bottom: 8px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .gz-btn {
+      flex: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      padding: 6px 4px;
+      font: inherit;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-mute);
+      background: transparent;
+      border: 0;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: color 0.12s ease, background 0.12s ease, transform 0.05s ease;
+    }
+    .gz-btn:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+    .gz-btn:active { transform: translateY(1px); }
+    .gz-btn.active {
+      color: #1c1404;
+      background: linear-gradient(180deg, var(--accent-hi), var(--accent));
+      box-shadow: 0 4px 12px rgba(244,184,96,0.28), inset 0 1px 0 rgba(255,255,255,0.4);
+    }
+    .gz-btn svg { flex: 0 0 auto; }
+    #objects-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      max-height: 280px;
+      overflow-y: auto;
+    }
+    #objects-list li {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      color: var(--text-mute);
+      border: 1px solid transparent;
+      transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+    }
+    #objects-list li:hover {
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+    }
+    #objects-list li.selected {
+      background: linear-gradient(180deg, rgba(244,184,96,0.20), rgba(244,184,96,0.06));
+      border-color: rgba(244,184,96,0.32);
+      color: var(--text);
+    }
+    #objects-list li.selected .dot {
+      background: var(--accent-hi);
+      box-shadow: 0 0 0 2px rgba(244,184,96,0.18);
+    }
+    #objects-list .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-dim);
+      flex: 0 0 auto;
+    }
+    #objects-list .name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 500;
+    }
+    #objects-list .delete {
+      background: transparent;
+      border: 0;
+      color: var(--text-dim);
+      cursor: pointer;
+      padding: 0 6px;
+      border-radius: 4px;
+      font-size: 16px;
+      line-height: 1;
+      transition: background 0.12s ease, color 0.12s ease;
+    }
+    #objects-list .delete:hover {
+      color: #ff9e9e;
+      background: rgba(255, 158, 158, 0.1);
+    }
+    #objects-add {
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.03);
+      border: 1px dashed var(--border);
+      color: var(--text-mute);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+    }
+    #objects-add:hover {
+      background: rgba(255,255,255,0.06);
+      color: var(--text);
+      border-color: var(--border-hi);
+    }
+
+    /* ---------- Volumes panel (shadow boxes / cylinders) --------------
+       Sits at bottom-left under the Objects panel. We deliberately keep
+       the right column reserved for the (tall) lil-gui so they never
+       overlap. */
+    #volumes-panel {
+      top: auto;
+      bottom: 18px;
+      left: 18px;
+      width: 240px;
+      padding: 10px 10px 8px;
+      font-size: 12px;
+      color: var(--text-mute);
+      pointer-events: auto;
+      user-select: none;
+    }
+    #volumes-panel.hidden { display: none; }
+    #volumes-panel .panel-label {
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      padding: 4px 6px 8px;
+    }
+    #volumes-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    #volumes-list:empty { display: none; }
+    #volumes-list li {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 7px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      color: var(--text-mute);
+      border: 1px solid transparent;
+      transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+    }
+    #volumes-list .row-main {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    #volumes-list .row-meta {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding-left: 16px;
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+    #volumes-list .parent-label {
+      flex: 0 0 auto;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      font-size: 10px;
+    }
+    #volumes-list .parent-select {
+      flex: 1 1 auto;
+      min-width: 0;
+      padding: 3px 6px;
+      font: inherit;
+      font-size: 11px;
+      color: var(--text);
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      cursor: pointer;
+      appearance: none;
+      -webkit-appearance: none;
+      background-image:
+        linear-gradient(45deg, transparent 50%, var(--text-dim) 50%),
+        linear-gradient(135deg, var(--text-dim) 50%, transparent 50%);
+      background-position:
+        calc(100% - 11px) center,
+        calc(100% - 7px) center;
+      background-size: 4px 4px;
+      background-repeat: no-repeat;
+      padding-right: 22px;
+    }
+    #volumes-list .parent-select:hover {
+      background-color: rgba(255,255,255,0.09);
+      border-color: var(--border-hi);
+    }
+    #volumes-list .parent-select:focus {
+      outline: none;
+      border-color: rgba(244,184,96,0.5);
+    }
+    #volumes-list li:hover {
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+    }
+    #volumes-list li.selected {
+      background: linear-gradient(180deg, rgba(244,184,96,0.20), rgba(244,184,96,0.06));
+      border-color: rgba(244,184,96,0.32);
+      color: var(--text);
+    }
+    /* Square dot for box, round dot for cylinder — quick visual cue. */
+    #volumes-list .dot {
+      width: 8px;
+      height: 8px;
+      background: var(--text-dim);
+      flex: 0 0 auto;
+      border-radius: 50%;
+    }
+    #volumes-list .dot[data-kind="box"]      { border-radius: 2px; }
+    #volumes-list .dot[data-kind="cylinder"] { border-radius: 50%; }
+    #volumes-list li.selected .dot {
+      background: var(--accent-hi);
+      box-shadow: 0 0 0 2px rgba(244,184,96,0.18);
+    }
+    #volumes-list .name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 500;
+    }
+    #volumes-list .delete {
+      background: transparent;
+      border: 0;
+      color: var(--text-dim);
+      cursor: pointer;
+      padding: 0 6px;
+      border-radius: 4px;
+      font-size: 16px;
+      line-height: 1;
+      transition: background 0.12s ease, color 0.12s ease;
+    }
+    #volumes-list .delete:hover {
+      color: #ff9e9e;
+      background: rgba(255, 158, 158, 0.1);
+    }
+    #volumes-add {
+      margin-top: 8px;
+      display: flex;
+      gap: 6px;
+    }
+    #volumes-add button {
+      flex: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.03);
+      border: 1px dashed var(--border);
+      color: var(--text-mute);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+    }
+    #volumes-add button:hover {
+      background: rgba(255,255,255,0.06);
+      color: var(--text);
+      border-color: var(--border-hi);
+    }
+
+    /* ---------- lil-gui dark theme -------------------------------------
+       lil-gui sets .title { height: var(--title-height) } — combined with
+       our box-sizing: border-box, vertical padding eats the content area
+       and clips the text. We override height to auto everywhere and let
+       padding define the row size. */
+    .lil-gui.root {
+      --background-color:           rgba(16, 16, 22, 0.85);
+      --text-color:                 var(--text);
+      --title-background-color:     transparent;
+      --title-text-color:           var(--text);
+      --widget-color:               rgba(255,255,255,0.05);
+      --hover-color:                rgba(255,255,255,0.10);
+      --focus-color:                rgba(244,184,96,0.55);
+      --number-color:               var(--accent-hi);
+      --string-color:               #b8c1d8;
+      --font-size:                  12px;
+      --input-font-size:            12px;
+      --font-family:                "Inter", -apple-system, sans-serif;
+      --font-family-mono:           "JetBrains Mono", ui-monospace, monospace;
+      --padding:                    10px;
+      --spacing:                    7px;
+      --widget-height:              22px;
+      --slider-knob-width:          4px;
+      --slider-input-width:         30%;
+      --color-input-width:          28%;
+      --slider-input-min-width:     52px;
+      --color-input-min-width:      52px;
+      --folder-indent:              0px;
+      --widget-padding:             0 0 0 4px;
+      --widget-border-radius:       6px;
+      --checkbox-size:              calc(0.85*var(--widget-height));
+      --scrollbar-width:            5px;
+
+      width: 286px;
+      top: 18px !important;
+      right: 18px !important;
+      backdrop-filter: blur(18px) saturate(140%);
+      -webkit-backdrop-filter: blur(18px) saturate(140%);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: var(--shadow-lg);
+      max-height: calc(100vh - 36px);
+    }
+
+    /* Main "Shadow Brush" header — was clipped by lil-gui's fixed
+       widget-height. height: auto + line-height + padding fixes it.
+       Subtle gradient gives the panel a clear "lid". */
+    .lil-gui.root > .title {
+      font-weight: 600;
+      font-size: 13px;
+      letter-spacing: 0.02em;
+      padding: 14px 16px 13px !important;
+      height: auto !important;
+      line-height: 1.25 !important;
+      color: var(--text) !important;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.015)) !important;
+      border-bottom: 1px solid var(--border);
+    }
+    .lil-gui.root > .title:before { display: none; } /* hide the chevron on root */
+
+    /* Folder titles — small caps section headers, separated by hairlines. */
+    .lil-gui .title {
+      font-weight: 600;
+      font-size: 10.5px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--text-mute) !important;
+      height: auto !important;
+      line-height: 1.25 !important;
+      padding: 11px 12px 9px !important;
+      background: transparent !important;
+      border-top: 1px solid rgba(255,255,255,0.05);
+      transition: color 0.12s ease, background 0.12s ease;
+    }
+    .lil-gui .title:hover {
+      color: var(--text) !important;
+      background: rgba(255,255,255,0.025) !important;
+    }
+    /* Don't double-up the divider on the first folder under a parent. */
+    .lil-gui > .children > .lil-gui:first-child > .title { border-top: 0; }
+    /* Subtler chevron */
+    .lil-gui .title:before { opacity: 0.5; transition: opacity 0.12s ease; }
+    .lil-gui .title:hover:before { opacity: 0.85; }
+
+    /* Controller rows — slightly more breathing room and softer labels. */
+    .lil-gui .controller {
+      padding-top: 2px !important;
+      padding-bottom: 2px !important;
+    }
+    .lil-gui .controller .name {
+      color: var(--text-mute);
+      font-size: 11.5px;
+      font-weight: 500;
+    }
+
+    /* Number / text inputs — recessed feel, tighter focus ring. */
+    .lil-gui input[type=text],
+    .lil-gui input[type=number] {
+      border-radius: 6px !important;
+      background: rgba(0,0,0,0.28) !important;
+      border: 1px solid rgba(255,255,255,0.04) !important;
+      transition: border-color 0.12s ease, background 0.12s ease;
+    }
+    .lil-gui input[type=text]:focus,
+    .lil-gui input[type=number]:focus {
+      border-color: rgba(244,184,96,0.45) !important;
+      background: rgba(0,0,0,0.36) !important;
+      outline: none !important;
+    }
+
+    /* Sliders — accent the fill so it picks up the warm amber theme
+       used elsewhere (selected rows, brand dot, brush highlights). */
+    .lil-gui .slider {
+      background: rgba(255,255,255,0.04) !important;
+      border-radius: 6px !important;
+      overflow: hidden;
+    }
+    .lil-gui .slider .fill {
+      background: linear-gradient(90deg, rgba(244,184,96,0.65), var(--accent)) !important;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.05);
+    }
+
+    /* Default buttons (most actions). */
+    .lil-gui button {
+      border-radius: 9px !important;
+      font-weight: 500;
+      letter-spacing: 0.01em;
+      padding: 8px 10px !important;
+      height: auto !important;
+      background: rgba(255,255,255,0.05) !important;
+      border: 1px solid var(--border) !important;
+      color: var(--text) !important;
+      transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, transform 0.05s ease;
+    }
+    .lil-gui button:hover {
+      background: rgba(255,255,255,0.09) !important;
+      border-color: var(--border-hi) !important;
+    }
+    .lil-gui button:active { transform: translateY(1px); }
+
+    /* "Add" buttons get a dashed outline so they look like creation
+       affordances rather than committed actions. */
+    .lil-gui .controller.add-btn button {
+      background: rgba(244,184,96,0.04) !important;
+      border: 1px dashed rgba(244,184,96,0.32) !important;
+      color: var(--accent-hi) !important;
+    }
+    .lil-gui .controller.add-btn button:hover {
+      background: rgba(244,184,96,0.10) !important;
+      border-color: rgba(244,184,96,0.55) !important;
+    }
+
+    /* Primary / destructive button accents — applied to specific
+       controllers via JS (.primary-action / .danger-action classes). */
+    .lil-gui .controller.primary-action button {
+      background: linear-gradient(180deg, var(--accent-hi), var(--accent)) !important;
+      border: 1px solid rgba(0,0,0,0.25) !important;
+      color: #1c1404 !important;
+      font-weight: 600;
+      box-shadow: 0 6px 16px rgba(244,184,96,0.22), inset 0 1px 0 rgba(255,255,255,0.4);
+    }
+    .lil-gui .controller.primary-action button:hover {
+      filter: brightness(1.06);
+    }
+    .lil-gui .controller.danger-action button {
+      background: rgba(255,120,120,0.08) !important;
+      border: 1px solid rgba(255,120,120,0.25) !important;
+      color: #ffb0b0 !important;
+    }
+    .lil-gui .controller.danger-action button:hover {
+      background: rgba(255,120,120,0.16) !important;
+      border-color: rgba(255,120,120,0.45) !important;
+      color: #ffd0d0 !important;
+    }
+
+    /* Checkboxes — slightly more visible. */
+    .lil-gui input[type=checkbox] {
+      border-radius: 4px !important;
+    }
+
+    /* Color picker swatch */
+    .lil-gui .controller.color .display { border-radius: 6px; }
+
+    /* Scrollbar inside the GUI when it gets long */
+    .lil-gui::-webkit-scrollbar { width: 6px; }
+    .lil-gui::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.10);
+      border-radius: 3px;
+    }
+    .lil-gui::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" tabindex="0"></canvas>
+
+  <div id="brand" class="ui-layer glass">
+    <div class="dot"></div>
+    <div class="name">Shadow <span>· splat brush</span></div>
+  </div>
+
+  <div id="objects-panel" class="ui-layer glass hidden">
+    <div class="panel-label">Objects</div>
+    <div id="gizmo-toolbar" role="tablist" aria-label="Gizmo mode">
+      <button class="gz-btn active" data-gz="translate" type="button" title="Move (G)">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v18M3 12h18M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3"/>
+        </svg>
+        <span>Move</span>
+      </button>
+      <button class="gz-btn" data-gz="rotate" type="button" title="Rotate (R)">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 12a9 9 0 1 0 3.5-7.1"/>
+          <path d="M3 4v5h5"/>
+        </svg>
+        <span>Rotate</span>
+      </button>
+      <button class="gz-btn" data-gz="scale" type="button" title="Scale (Y)">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="6" y="6" width="12" height="12" rx="1.5"/>
+          <path d="M9 9h6v6"/>
+        </svg>
+        <span>Scale</span>
+      </button>
+    </div>
+    <ul id="objects-list"></ul>
+    <button id="objects-add" type="button">+ Add object</button>
+  </div>
+
+  <div id="volumes-panel" class="ui-layer glass hidden">
+    <div class="panel-label">Shadow volumes</div>
+    <ul id="volumes-list"></ul>
+    <div id="volumes-add">
+      <button id="volumes-add-box" type="button" title="Add a box-shaped shadow volume">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3 4 7v10l8 4 8-4V7z"/>
+          <path d="M4 7l8 4 8-4"/>
+          <path d="M12 11v10"/>
+        </svg>
+        <span>+ Box</span>
+      </button>
+      <button id="volumes-add-cyl" type="button" title="Add a cylinder-shaped shadow volume">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="6" rx="7" ry="2.5"/>
+          <path d="M5 6v12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V6"/>
+        </svg>
+        <span>+ Cylinder</span>
+      </button>
+    </div>
+  </div>
+
+  <div id="mode-bar" class="ui-layer glass" role="tablist" aria-label="Tool mode">
+    <button class="mode-btn" data-mode="view"   type="button"><span class="dot"></span>Orbit<kbd>Esc</kbd></button>
+    <button class="mode-btn" data-mode="shadow" type="button"><span class="dot"></span>Shadow<kbd>1</kbd></button>
+    <button class="mode-btn" data-mode="undo"   type="button"><span class="dot"></span>Undo<kbd>2</kbd></button>
+  </div>
+
+  <div id="mode-overlay" class="ui-layer glass"></div>
+
+  <div id="loading" class="hidden">
+    <div class="ring"></div>
+    <div class="label">Loading splats…</div>
+  </div>
+
+  <div id="dropzone">
+    <div class="card">
+      <div class="glyph" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v12"/>
+          <path d="M7 10l5 5 5-5"/>
+          <path d="M5 21h14"/>
+        </svg>
+      </div>
+      <div class="title">Cast a Shadow</div>
+      <div class="subtitle">
+        Drop a Gaussian splat anywhere on this window to begin, or pick one from your machine.
+        Files stay local — nothing is uploaded.
+      </div>
+      <div class="formats">
+        <code>.spz</code><code>.ply</code><code>.splat</code><code>.ksplat</code>
+      </div>
+      <div>
+        <button id="browse-btn" class="browse" type="button">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+          </svg>
+          Choose splat file
+        </button>
+      </div>
+      <div class="hint">Drag &amp; drop also works</div>
+    </div>
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
+        "@sparkjsdev/spark": "https://sparkjs.dev/releases/spark/2.1.0/spark.module.js",
+        "lil-gui": "https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/dist/lil-gui.esm.js"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { TransformControls } from "three/addons/controls/TransformControls.js";
+    import {
+      dyno,
+      SparkRenderer,
+      SplatMesh,
+      RgbaArray,
+      readRgbaArray,
+      SparkControls,
+      SpzWriter,
+      PackedSplats,
+      unpackSplat,
+    } from "@sparkjsdev/spark";
+    import { GUI } from "lil-gui";
+
+    // -----------------------------------------------------------------------
+    // Parameters – everything the GPU shader needs is exposed via dyno values
+    // so we can tweak from the UI in real time.
+    // -----------------------------------------------------------------------
+    const PARAMETERS = {
+      controlsEnabled: true,
+      shadowEnabled:   dyno.dynoBool(false),
+      undoEnabled:     dyno.dynoBool(false),
+      // false = circle (cylinder), true = square (rectangular prism)
+      brushSquare:     dyno.dynoBool(false),
+      brushRadius:     dyno.dynoFloat(0.08),
+      brushDepth:      dyno.dynoFloat(10.0),
+      brushOrigin:     dyno.dynoVec3(new THREE.Vector3(0, 0, 0)),
+      brushDirection:  dyno.dynoVec3(new THREE.Vector3(0, 0, -1)),
+      // Orthonormal basis perpendicular to brushDirection — used by the square
+      // brush to test against axis-aligned rectangular cross-section.
+      brushRight:      dyno.dynoVec3(new THREE.Vector3(1, 0, 0)),
+      brushUp:         dyno.dynoVec3(new THREE.Vector3(0, 1, 0)),
+      // How much to darken per stroke (1 = no change, 0 = pure black).
+      // Pure multiplicative darken — preserves hue & saturation just like
+      // a natural shadow, so colors stay visible no matter how deep.
+      // Driven by the "Shadow strength" slider in the UI:
+      //   strength 0   → darkness 1.0 (no effect, fully transparent shadow)
+      //   strength 0.5 → darkness 0.5 (very strong shadow per stroke)
+      darkness:        dyno.dynoFloat(0.92),
+      // Per-stamp deposit amount in [0..1]. Each pointer move blends the
+      // shadowed color over the existing splat by `flow * brushWeight`, so
+      // low values give an airbrush-style gradual buildup instead of a
+      // hard stamp on every event. Combined with distance-based throttling
+      // in JS, this gives a smooth, paintable feel.
+      flow:            dyno.dynoFloat(0.18),
+      // Cool tint (0..1) — at 0 the shadow is neutral; at 1 it picks up a
+      // subtle blue cast like real shadows lit by ambient skylight.
+      coolTint:        dyno.dynoFloat(0.0),
+      // Edge softness (0..1) — 0 = sharp brush boundary, 1 = full smooth
+      // falloff from brush center to edge. The shader smoothsteps from 0
+      // at the boundary to 1 at `radius * softness` inward.
+      edgeSoftness:    dyno.dynoFloat(0.4),
+      brushShape:      "circle",
+    };
+
+    // Minimum cursor travel (in CSS pixels) between paint stamps while a
+    // drag is in progress. Prevents stamps from piling up on the same
+    // splats when the user drags slowly or wiggles in place. Also gated
+    // by a small minimum time so we never fire faster than ~120 Hz.
+    const STAMP_MIN_DIST_PX = 4;
+    const STAMP_MIN_INTERVAL_MS = 8;
+
+    const MIN_BRUSH_RADIUS = 0.01;
+    const MAX_BRUSH_RADIUS = 0.4;
+    const MIN_BRUSH_DEPTH = 0.1;
+    const MAX_BRUSH_DEPTH = 100.0;
+
+    // -----------------------------------------------------------------------
+    // OBJECTS — the user can load multiple PLY/SPZ files (e.g. a world,
+    // chairs, tables) and select one at a time to paint shadows on. Each
+    // object owns its own SplatMesh + per-splat shadow mask, so brushing
+    // affects only the selected object's splats.
+    //
+    // Object record: { id, name, file, splatMesh, shadowMask }
+    //   • id          — unique string, used by the panel + selection state
+    //   • name        — display name (defaults to filename without ext)
+    //   • file        — original File (for LOD reloads / "rebuild")
+    //   • splatMesh   — Spark SplatMesh
+    //   • shadowMask  — RgbaArray storing per-splat per-channel multiplier;
+    //                   starts at (1,1,1,1), bakes update it in place
+    // -----------------------------------------------------------------------
+    const objects = [];
+    let selectedObjectId = null;
+    let nextObjectId = 1;
+
+    function getSelected() {
+      return objects.find((o) => o.id === selectedObjectId) ?? null;
+    }
+    function getSelectedMesh()  { return getSelected()?.splatMesh ?? null; }
+    function getSelectedMask()  { return getSelected()?.shadowMask ?? null; }
+    function hasObjects()       { return objects.length > 0; }
+
+    // Spark's level-of-detail pyramid lets us render huge (40M+) splats
+    // interactively by merging distant/small splats into coarser
+    // representatives. It's OFF by default because LOD reorders splats
+    // — the rendered `index` is into the merged array, not the
+    // original — which doesn't line up with our per-original-splat
+    // shadow mask. The brush would paint the wrong splats. When the
+    // user explicitly opts in via the GUI checkbox, we still keep the
+    // currently SELECTED object running without LOD so the brush works
+    // on it, while unselected meshes get LOD for fast viewing.
+    //   `quality`: 1.1 = sharpest (more splats kept), 2.0 = most
+    //   aggressive merging. 1.3 is a reasonable sweet spot.
+    //
+    // Default: ON. The first loaded object is auto-selected and the
+    // selection-aware policy turns LOD OFF on it, so the brush still
+    // works on whatever the user is currently editing while every
+    // other (unselected) mesh keeps its LOD pyramid for performance.
+    // This is the right default for 20M+ splat scenes; flip via the
+    // GUI checkbox if you don't need it.
+    // Default OFF: when LOD is on at construction the LOD pyramid replaces
+    // the rendering path even after we set `enableLod = false` per-mesh, and
+    // the visible result is a black / empty scene on some captures. Keep
+    // LOD opt-in via the GUI checkbox below — flip it on for very large
+    // (20M+) splat scenes where the perf win is needed; everything else
+    // renders fine without it.
+    const LOD = { enabled: false, quality: 1.3 };
+
+    // Push the selection-aware LOD policy onto a single mesh + the whole
+    // scene. Called whenever selection or the global LOD toggle changes;
+    // toggling `enableLod` at runtime is a single uniform flip in Spark
+    // (it auto-rebuilds the generator on the next frame) so this is cheap.
+    function applyLodForMesh(obj) {
+      if (!obj || !obj.splatMesh) return;
+      const isSelected = obj.id === selectedObjectId;
+      const desired = LOD.enabled && !isSelected;
+      if (obj.splatMesh.enableLod !== desired) {
+        obj.splatMesh.enableLod = desired;
+      }
+    }
+    function applyLodForAllMeshes() {
+      for (const o of objects) applyLodForMesh(o);
+    }
+
+    // -----------------------------------------------------------------------
+    // SHADOW VOLUMES
+    //
+    // In addition to the per-splat brush, the user can drop simple
+    // geometric "shadow volumes" (boxes / cylinders) into the scene. Any
+    // splat in any loaded object that falls inside a volume gets darkened,
+    // with a smooth falloff from the edge to the center.
+    //
+    // Each volume is a Three.js Object3D (so the existing gizmo can move /
+    // rotate / scale it directly). Inside the worldModifier shader we
+    // transform each splat's WORLD-space center by the volume's inverse
+    // world matrix, which puts the splat into a unit-sized local space:
+    //   Box      : signed distance to the [-0.5, 0.5]^3 cube
+    //   Cylinder : signed distance to a cylinder (radius 0.5, height 1, Y axis)
+    // The helper geometry matches those dimensions, so the gizmo's scale
+    // directly controls the volume's effective extent. The brush mask is
+    // unchanged; the volume factor just multiplies on top of it.
+    // -----------------------------------------------------------------------
+    const MAX_VOLUMES = 16;
+    const volumes = [];          // [{ id, name, type, helper }]
+    let nextVolumeId = 1;
+    let selectedVolumeId = null;
+
+    // Global per-volume style — applied uniformly to every volume so a
+    // single pair of sliders ("Softness" / "Intensity") controls the
+    // overall look. Per-volume controls would be straightforward to add
+    // later by storing these on the volume record instead.
+    const volumeStyle = {
+      intensity: 0.6,  // 0 = no effect, 1 = pure black at the volume's center
+      softness:  0.4,  // 0 = hard edge, 0.5 = smoothed all the way to center
+    };
+
+    // Backing storage for the uniform arrays the shader reads. We mutate
+    // these in place each frame in syncVolumeUniforms() — three.js keeps
+    // re-uploading the array as long as we set `value` to the same buffer.
+    const _volumeMatricesArray = new Float32Array(MAX_VOLUMES * 16);
+    const _volumeParamsArray   = new Float32Array(MAX_VOLUMES * 4);
+    for (let i = 0; i < MAX_VOLUMES; i++) {
+      _volumeMatricesArray.set(
+        [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1],
+        i * 16,
+      );
+    }
+    const _volumeInvMatScratch = new THREE.Matrix4();
+
+    const _volumeNum = dyno.dynoInt(0);
+    const _volumeInvMats = new dyno.DynoUniform({
+      key: "_shadowVolInvMats",
+      type: "mat4",
+      count: MAX_VOLUMES,
+      value: _volumeMatricesArray,
+    });
+    const _volumeParams = new dyno.DynoUniform({
+      key: "_shadowVolParams",
+      type: "vec4",
+      count: MAX_VOLUMES,
+      value: _volumeParamsArray,
+    });
+
+    // Pulls the latest helper transforms into the uniform arrays. Called
+    // every frame from the render loop. Cheap (≤ MAX_VOLUMES * matrix
+    // inverse) and runs on the CPU.
+    function syncVolumeUniforms() {
+      const n = Math.min(volumes.length, MAX_VOLUMES);
+      _volumeNum.value = n;
+      for (let i = 0; i < n; i++) {
+        const v = volumes[i];
+        // updateWorldMatrix(true, false) walks UP the scene graph and
+        // refreshes every ancestor's world matrix before recomputing
+        // ours. This matters when the helper is parented to a SplatMesh:
+        // dragging that splat with the gizmo updates splat.position, but
+        // splat.matrixWorld stays stale until the next render's full
+        // updateMatrixWorld pass — which runs AFTER us. A plain
+        // updateMatrixWorld() reads parent.matrixWorld directly and so
+        // would feed the shader a 1-frame-stale invMatrix, making the
+        // shadow visibly drag behind the parent during a drag.
+        v.helper.updateWorldMatrix(true, false);
+        _volumeInvMatScratch.copy(v.helper.matrixWorld).invert();
+        _volumeMatricesArray.set(_volumeInvMatScratch.elements, i * 16);
+        _volumeParamsArray[i*4 + 0] = v.type === "cylinder" ? 1.0 : 0.0;
+        _volumeParamsArray[i*4 + 1] = volumeStyle.softness;
+        _volumeParamsArray[i*4 + 2] = volumeStyle.intensity;
+        _volumeParamsArray[i*4 + 3] = 0.0;
+      }
+    }
+
+    // Two SDFs in unit (gizmo-scaled) space; the gizmo's scale becomes the
+    // effective half-extent of the volume. We use `max` (not `min`) so the
+    // shape's outside is positive and inside is negative — standard SDF
+    // sign convention. The helper geometries match these dimensions.
+    const _volumeShaderHelpers = `
+      float _shadowVolBoxSdf(vec3 p) {
+        vec3 d = abs(p) - vec3(0.5);
+        return max(d.x, max(d.y, d.z));
+      }
+      float _shadowVolCylSdf(vec3 p) {
+        return max(length(p.xz) - 0.5, abs(p.y) - 0.5);
+      }
+    `;
+
+    // Builds the per-splat darkness multiplier coming from all active
+    // shadow volumes. Loop is bounded by MAX_VOLUMES (compile-time const)
+    // and short-circuits via the active count uniform, so unused slots
+    // cost a single int compare in the shader.
+    function volumeFactorDyno(centerDyno) {
+      return new dyno.Dyno({
+        inTypes: { center: "vec3", num: "int", invMats: "mat4", params: "vec4" },
+        outTypes: { factor: "float" },
+        inputs: {
+          center: centerDyno,
+          num: _volumeNum,
+          invMats: _volumeInvMats,
+          params: _volumeParams,
+        },
+        globals: () => [_volumeShaderHelpers],
+        statements: ({ inputs, outputs }) => [
+          "float _vfac = 1.0;",
+          `for (int _vi = 0; _vi < ${MAX_VOLUMES}; _vi++) {`,
+          `  if (_vi >= ${inputs.num}) { break; }`,
+          `  vec3 _vlocal = (${inputs.invMats}[_vi] * vec4(${inputs.center}, 1.0)).xyz;`,
+          `  float _vsdf = (${inputs.params}[_vi].x > 0.5) ? _shadowVolCylSdf(_vlocal) : _shadowVolBoxSdf(_vlocal);`,
+          `  float _vsoft = max(${inputs.params}[_vi].y, 0.001);`,
+          `  float _vint  = ${inputs.params}[_vi].z;`,
+          `  float _vt = smoothstep(0.0, _vsoft, -_vsdf);`,
+          `  _vfac *= mix(1.0, 1.0 - _vint, _vt);`,
+          "}",
+          `${outputs.factor} = _vfac;`,
+        ],
+      }).outputs.factor;
+    }
+
+    // -----------------------------------------------------------------------
+    // SHADOW MASK ARCHITECTURE
+    //
+    // We store a per-splat rgba8 "shadow mask" that starts at (1,1,1,1) and
+    // gets multiplied down by each paint stamp. The renderer's worldModifier
+    // simply does gsplat.rgb *= mask.rgb at render time. Why this scheme?
+    //
+    // The previous implementation baked (base * darkness^N) directly into
+    // splatRgba, which has 8 bits per channel. For a warm wood splat like
+    // (200, 80, 30), the blue channel hits its quantization floor very
+    // quickly (one rounding step), while red and green keep decreasing —
+    // so after enough strokes the relative ratios drift toward green/blue
+    // and the shadow looks tinted. With a mask that's all-equal-channel
+    // when coolTint=0, every channel quantizes uniformly together and
+    // there is no hue drift. (Cool tint deliberately diverges channels.)
+    // -----------------------------------------------------------------------
+
+    // worldModifier: multiplies the rendered rgb by a per-splat mask.
+    // Everything brush-related happens in the BAKE pass instead.
+    //
+    // LOD interaction: with LOD enabled, Spark renders a mix of original
+    // splats AND merged "representative" splats whose indices are >= our
+    // mask's count. `readRgbaArray` returns (0,0,0,0) for those — which
+    // we'd otherwise multiply into rgb and render them black. We use the
+    // alpha channel as an in-bounds sentinel (valid masks are always
+    // alpha=1 because the bake leaves alpha untouched; only OOB reads
+    // return alpha=0) and fall back to an identity multiplier for those
+    // synthesized splats so distant LOD geometry just renders unshadowed.
+    const _identityMaskRgb = dyno.dynoVec3(new THREE.Vector3(1, 1, 1));
+    const _half            = dyno.dynoFloat(0.5);
+    function shadowDyno(maskDyno) {
+      return dyno.dynoBlock(
+        { gsplat: dyno.Gsplat },
+        { gsplat: dyno.Gsplat },
+        ({ gsplat }) => {
+          if (!gsplat) throw new Error("shadowDyno: missing gsplat input");
+          // Spark applies the object→world transform BEFORE world
+          // modifiers run, so `center` here is in world space — exactly
+          // what we want for shadow volumes (placed in world space).
+          const { rgb, index, center } = dyno.splitGsplat(gsplat).outputs;
+
+          // 1. Brush mask — per-splat multiplier. OOB reads (LOD-merged
+          //    splats whose index is past the original count) come back
+          //    as alpha=0 and fall through to identity instead of black.
+          const mask4    = readRgbaArray(maskDyno, index);
+          const maskA    = dyno.swizzle(mask4, "a");
+          const inBounds = dyno.greaterThan(maskA, _half);
+          const maskRgb  = dyno.select(inBounds, dyno.vec3(mask4), _identityMaskRgb);
+
+          // 2. Shadow volumes — global geometric darkeners; same factor
+          //    is applied to every loaded mesh so a volume "casts" across
+          //    the whole scene.
+          const volFactor = volumeFactorDyno(center);
+
+          // 3. Stack: rgb * brush * volumes. Both factors are <= 1 so the
+          //    splat can only get darker, never brighter.
+          const newRgb = dyno.mul(dyno.mul(rgb, maskRgb), volFactor);
+          gsplat = dyno.combineGsplat({ gsplat, rgb: newRgb });
+          return { gsplat };
+        },
+      );
+    }
+
+    // Bake-pass dyno: runs once per pointer move, reads the current mask
+    // and the splat center, and outputs the NEW mask value for this splat.
+    // Inside the brush we multiply the mask down (shadow) or push it back
+    // toward 1 (undo). Outside the brush the mask is passed through.
+    function shadowMaskBakeDyno(packedSplatsDyno, currentMaskDyno) {
+      const coolMul = dyno.dynoVec3(new THREE.Vector3(0.82, 0.92, 1.05));
+      const oneVec3 = dyno.dynoVec3(new THREE.Vector3(1.0, 1.0, 1.0));
+      const oneVec4 = dyno.dynoVec4(new THREE.Vector4(1.0, 1.0, 1.0, 1.0));
+      const ZERO    = dyno.dynoFloat(0.0);
+      const ONE     = dyno.dynoFloat(1.0);
+
+      return dyno.dynoBlock(
+        { index: "int" },
+        { rgba8: "vec4" },
+        ({ index }) => {
+          // Read this splat's center (from the original packed array — the
+          // mask is keyed 1:1 by splat index so we never go through SH or
+          // splatRgba here).
+          const packedGsplat = dyno.readPackedSplat(packedSplatsDyno, index);
+          const center = dyno.splitGsplat(packedGsplat).outputs.center;
+
+          // Read the current mask value for this splat.
+          const currentMask = readRgbaArray(currentMaskDyno, index);
+
+          // ---- brush position math (signed dist + smooth falloff) -------
+          const offset = dyno.sub(center, PARAMETERS.brushOrigin);
+          const along  = dyno.dot(PARAMETERS.brushDirection, offset);
+          const onAxis = dyno.add(
+            PARAMETERS.brushOrigin,
+            dyno.mul(PARAMETERS.brushDirection, along),
+          );
+          const perp     = dyno.sub(center, onAxis);
+          const radial   = dyno.length(perp);
+          const circleEd = dyno.sub(PARAMETERS.brushRadius, radial);
+          const rightDist = dyno.abs(dyno.dot(perp, PARAMETERS.brushRight));
+          const upDist    = dyno.abs(dyno.dot(perp, PARAMETERS.brushUp));
+          const squareEd  = dyno.min(
+            dyno.sub(PARAMETERS.brushRadius, rightDist),
+            dyno.sub(PARAMETERS.brushRadius, upDist),
+          );
+          const edgeDist = dyno.select(PARAMETERS.brushSquare, squareEd, circleEd);
+          const falloff  = dyno.max(
+            dyno.mul(PARAMETERS.brushRadius, PARAMETERS.edgeSoftness),
+            dyno.mul(PARAMETERS.brushRadius, dyno.dynoFloat(0.005)),
+          );
+          const radialWeight = dyno.smoothstep(ZERO, falloff, edgeDist);
+          const inDepth = dyno.and(
+            dyno.greaterThan(along, ZERO),
+            dyno.lessThan(along, PARAMETERS.brushDepth),
+          );
+          const depthMask   = dyno.select(inDepth, ONE, ZERO);
+          const brushWeight = dyno.mul(radialWeight, depthMask);
+
+          // ---- per-channel shadow multiplier ----------------------------
+          //  tintVec is (1,1,1) when coolTint=0 (no hue shift, uniform
+          //  darken — this is the case where mask channels stay equal and
+          //  quantization can't introduce a tint). Cool tint diverges them
+          //  intentionally toward (0.82, 0.92, 1.05).
+          const tintVec = dyno.add(
+            oneVec3,
+            dyno.mul(dyno.sub(coolMul, oneVec3), PARAMETERS.coolTint),
+          );
+          const channelMul3 = dyno.mul(tintVec, PARAMETERS.darkness);
+          // Pad to vec4 with alpha=1 so multiplying the mask doesn't
+          // change the alpha channel of the mask texture.
+          const channelMul4 = dyno.extendVec(channelMul3, ONE);
+
+          // ---- update the mask ------------------------------------------
+          // Per-stamp deposit amount (gated by mode + brushWeight + flow).
+          const stamp        = dyno.mul(brushWeight, PARAMETERS.flow);
+          const shadowAmount = dyno.mul(
+            stamp, dyno.select(PARAMETERS.shadowEnabled, ONE, ZERO),
+          );
+          const undoAmount   = dyno.mul(
+            stamp, dyno.select(PARAMETERS.undoEnabled, ONE, ZERO),
+          );
+          // Shadow: scale mask by mix(1, channelMul, shadowAmount).
+          // Undo: blend mask back toward 1 by undoAmount.
+          const shadowMul = dyno.mix(oneVec4, channelMul4, shadowAmount);
+          let newMask = dyno.mul(currentMask, shadowMul);
+          newMask     = dyno.mix(newMask, oneVec4, undoAmount);
+
+          return { rgba8: newMask };
+        },
+      );
+    }
+
+    // Build an RgbaArray of `count` entries all set to (1,1,1,1) — the
+    // identity mask, i.e. "no shadow yet".
+    function makeAllOnesRgbaArray(count) {
+      const arr = new RgbaArray();
+      arr.render({
+        renderer,
+        count,
+        reader: dyno.dynoBlock(
+          { index: "int" },
+          { rgba8: "vec4" },
+          () => ({
+            rgba8: dyno.dynoConst("vec4", new THREE.Vector4(1, 1, 1, 1)),
+          }),
+        ),
+      });
+      return arr;
+    }
+
+    // Build a SplatMesh wired up for shadow painting. The caller is
+    // responsible for installing the resulting `shadowMask` onto the
+    // returned mesh's worldModifier; we attach a temporary identity-mask
+    // worldModifier inside onLoad so the mesh renders correctly even
+    // before the host code installs the "real" mask reference.
+    function makeShadowSplatMesh(url, onReady) {
+      const meshOpts = {
+        url,
+        onFrame: ({ mesh }) => { mesh.needsUpdate = true; },
+      };
+      // Build the LOD pyramid when enabled (default). The pyramid lets the
+      // renderer merge distant splats for performance on huge scenes; see
+      // the LOD constant above for the painting interaction.
+      if (LOD.enabled) meshOpts.lod = LOD.quality;
+      const splatMesh = new SplatMesh({
+        ...meshOpts,
+        onLoad: () => {
+          // splatRgba override "freezes" the rendered base color (no SH)
+          // when LOD is OFF, so the shadow mask multiplies a stable
+          // per-splat value that doesn't drift with view direction. Spark
+          // intentionally skips this override when LOD is ON (because
+          // lodSplats may have synthesized splats that don't have an
+          // entry in our per-original-splat array), so under LOD we
+          // simply multiply the mask onto the SH-evaluated rgb instead.
+          splatMesh.splatRgba = new RgbaArray().fromPackedSplats({
+            packedSplats: splatMesh.packedSplats,
+            base: 0,
+            count: splatMesh.packedSplats.numSplats,
+            renderer,
+          });
+          // Per-object shadow mask, owned by the caller via onReady.
+          const shadowMask = makeAllOnesRgbaArray(splatMesh.packedSplats.numSplats);
+          splatMesh.worldModifier = shadowDyno(shadowMask.dyno);
+          splatMesh.updateGenerator();
+          if (onReady) onReady(splatMesh, shadowMask);
+        },
+      });
+      return splatMesh;
+    }
+
+    // -----------------------------------------------------------------------
+    // Three.js / Spark scene setup
+    // -----------------------------------------------------------------------
+    const canvas = document.getElementById("canvas");
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(new THREE.Color(0x0b0b10), 1);
+
+    const scene = new THREE.Scene();
+    const spark = new SparkRenderer({ renderer });
+    scene.add(spark);
+
+    const controls = new SparkControls({ canvas: renderer.domElement });
+    const camera = new THREE.PerspectiveCamera(
+      50, window.innerWidth / window.innerHeight, 0.01, 1000,
+    );
+    camera.position.set(0, 0, 0);
+    camera.lookAt(0, 0, -1);
+    scene.add(camera);
+
+    function handleResize() {
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+    handleResize();
+    window.addEventListener("resize", handleResize);
+
+    // Frame the camera on a freshly loaded SplatMesh so it's always visible
+    // regardless of the splat's stored world coordinates. .spz captures
+    // routinely land hundreds of meters away from the world origin, which
+    // would otherwise leave the user staring at an empty scene with only
+    // the gizmo visible.
+    function frameCameraOnMesh(splatMesh) {
+      try {
+        const box = splatMesh.getBoundingBox(true);
+        if (!box || !isFinite(box.min.x) || !isFinite(box.max.x)) return;
+        const center = box.getCenter(new THREE.Vector3());
+        const size   = box.getSize(new THREE.Vector3());
+        const radius = Math.max(size.x, size.y, size.z, 0.01);
+
+        // Pull the camera back along world -Z by ~1.5 * the splat radius
+        // and aim at the splat's center. Slight elevation looks nicer than
+        // dead-on. We DON'T touch fpsMovement/orbit state — the user can
+        // immediately fly around from the new vantage.
+        const fovRad = camera.fov * Math.PI / 180;
+        const dist   = Math.max(radius / Math.tan(fovRad / 2), radius * 1.5);
+        camera.position.set(center.x, center.y + radius * 0.25, center.z + dist);
+        camera.up.set(0, 1, 0);
+        camera.lookAt(center);
+        camera.near = Math.max(0.01, dist * 0.001);
+        camera.far  = Math.max(1000, dist * 50);
+        camera.updateProjectionMatrix();
+      } catch (e) {
+        console.warn("frameCameraOnMesh failed; leaving camera as-is", e);
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Transform gizmo — appears on the currently-selected object so the
+    // user can translate / rotate / scale it directly in the viewport.
+    // We use a single shared TransformControls instance and re-attach it
+    // whenever the selection changes (or hide it when nothing is selected).
+    // -----------------------------------------------------------------------
+    const transformControls = new TransformControls(camera, renderer.domElement);
+    transformControls.size = 0.85;
+    transformControls.setSpace("world");
+    transformControls.setMode("translate");
+    // Three.js r166+ — TransformControls is no longer an Object3D; you add
+    // its helper to the scene instead.
+    const transformHelper = transformControls.getHelper
+      ? transformControls.getHelper()
+      : transformControls; // r165 fallback
+    transformHelper.visible = false;
+    scene.add(transformHelper);
+
+    // SparkControls splits its behavior across two sub-controllers:
+    //   • controls.fpsMovement   → keyboard fly (WASD/QE/arrows)
+    //   • controls.pointerControls → mouse drag rotate / pan
+    // Setting `controls.enabled` is a no-op (the SparkControls class doesn't
+    // even read it). We keep flycam ALWAYS on, and only disable the pointer
+    // rotate/pan path while the gizmo (or anything else) needs the mouse.
+    function setOrbitEnabled(enabled) {
+      if (controls.pointerControls) controls.pointerControls.enable = enabled;
+      // If we're disabling, immediately drop any active drag bookkeeping +
+      // momentum so the camera doesn't snap or coast when control returns.
+      if (!enabled && controls.pointerControls) {
+        controls.pointerControls.rotating = null;
+        controls.pointerControls.sliding  = null;
+        controls.pointerControls.rotateVelocity?.set?.(0, 0, 0);
+        controls.pointerControls.moveVelocity?.set?.(0, 0, 0);
+      }
+    }
+
+    // While the user is dragging a gizmo handle we want to:
+    //   1. Disable Spark's mouse-drag orbit so the camera doesn't fight it.
+    //      (WASD/QE keep working — fpsMovement stays enabled.)
+    //   2. Disable our brush so a pointer-down on a handle isn't mistaken
+    //      for a paint stamp.
+    let gizmoDragging = false;
+    transformControls.addEventListener("dragging-changed", (event) => {
+      gizmoDragging = event.value;
+      setOrbitEnabled(!event.value);
+    });
+
+    // -----------------------------------------------------------------------
+    // Splat loading
+    // -----------------------------------------------------------------------
+    const loadingEl = document.getElementById("loading");
+    const dropzoneEl = document.getElementById("dropzone");
+    const browseBtn = document.getElementById("browse-btn");
+
+    // Force a SplatMesh into +Y-up world space (no rotation). Some
+    // SplatMesh code paths overwrite the local quaternion while loading
+    // / when the LOD pyramid is built, so we also re-call this after init.
+    function lockUpright(mesh) {
+      if (!mesh) return;
+      mesh.quaternion.identity();
+      mesh.updateMatrix();
+      mesh.updateMatrixWorld(true);
+    }
+
+    function isSupportedSplat(file) {
+      return /\.(spz|ply|splat|ksplat)$/i.test(file.name);
+    }
+
+    function basenameNoExt(name) {
+      return (name || "").replace(/\.[^.]+$/, "") || "shadow-splat";
+    }
+
+    // Add a new object to the scene from a File (drag-dropped or picked).
+    // Existing objects are preserved — selection moves to the new one.
+    async function addObjectFromFile(file) {
+      if (!isSupportedSplat(file)) {
+        alert(`Unsupported file: ${file.name}\nUse .spz, .ply, .splat, or .ksplat.`);
+        return;
+      }
+      dropzoneEl.classList.add("hidden");
+      loadingEl.classList.remove("hidden");
+
+      const id = `obj-${nextObjectId++}`;
+      const name = basenameNoExt(file.name);
+      const url = URL.createObjectURL(file);
+      // Create record up-front so we can reference `id` in callbacks even
+      // before the mesh has finished loading.
+      const obj = { id, name, file, splatMesh: null, shadowMask: null };
+      objects.push(obj);
+
+      try {
+        const splatMesh = makeShadowSplatMesh(url, (mesh, shadowMask) => {
+          obj.splatMesh  = mesh;
+          obj.shadowMask = shadowMask;
+        });
+        obj.splatMesh = splatMesh;
+        // Stage the splat at the world origin temporarily; we'll re-center
+        // it (and the camera) once we know its bounds.
+        splatMesh.position.set(0, 0, 0);
+        lockUpright(splatMesh);
+        scene.add(splatMesh);
+
+        await splatMesh.initialized;
+        lockUpright(splatMesh);
+
+        // Belt-and-suspenders: if onReady didn't run, build the mask now.
+        if (!obj.shadowMask) {
+          obj.shadowMask = makeAllOnesRgbaArray(splatMesh.packedSplats.numSplats);
+          splatMesh.worldModifier = shadowDyno(obj.shadowMask.dyno);
+          splatMesh.updateGenerator();
+        }
+
+        // Most .spz captures are stored in arbitrary world coordinates —
+        // dropping a fresh file on a camera at (0,0,0) can easily put the
+        // entire splat off-screen, leaving only the gizmo visible. Frame
+        // the camera on the splat ONLY for the first object so subsequent
+        // loads don't yank the camera around the user.
+        if (objects.length === 1) {
+          frameCameraOnMesh(splatMesh);
+        }
+
+        selectObject(id);
+      } catch (err) {
+        console.error("Failed to load splat", err);
+        // Surface the underlying error message so we don't always need
+        // DevTools to debug a failed load — especially common with very
+        // large files where the issue is usually OOM, an LOD pyramid
+        // worker crash, or a SPZ format mismatch.
+        const msg = (err && err.message) ? err.message : String(err);
+        alert(`Failed to load ${file.name}\n\n${msg}\n\n(See console for stack.)`);
+        const idx = objects.findIndex((o) => o.id === id);
+        if (idx !== -1) objects.splice(idx, 1);
+        if (!hasObjects()) dropzoneEl.classList.remove("hidden");
+      } finally {
+        URL.revokeObjectURL(url);
+        loadingEl.classList.add("hidden");
+        renderObjectsPanel();
+      }
+    }
+
+    // Remove an object from the scene and free its GPU resources.
+    function removeObject(id) {
+      const idx = objects.findIndex((o) => o.id === id);
+      if (idx === -1) return;
+      const obj = objects[idx];
+      // Orphan any volumes parented to this splat BEFORE we remove the
+      // splat from the scene — setVolumeParent uses attach() to preserve
+      // the volumes' world transforms, but only works while the old
+      // parent still has a valid matrixWorld.
+      for (const v of volumes) {
+        if (v.parentId === id) setVolumeParent(v.id, null);
+      }
+      // If the gizmo is currently attached to this mesh, detach BEFORE we
+      // remove it from the scene — otherwise TransformControls keeps a
+      // dangling reference.
+      if (transformControls.object === obj.splatMesh) transformControls.detach();
+      if (obj.splatMesh) scene.remove(obj.splatMesh);
+      if (obj.shadowMask) obj.shadowMask.dispose();
+      objects.splice(idx, 1);
+      if (!hasObjects()) {
+        dropzoneEl.classList.remove("hidden");
+      }
+      if (selectedObjectId === id) {
+        // The removed splat WAS selected — move the gizmo to the next
+        // splat (if any) or fully deselect. selectObject() also clears
+        // any volume selection via the splat/volume mutex.
+        selectObject(objects[0]?.id ?? null);
+      } else {
+        // A different splat (or a volume) was selected — leave that
+        // selection intact and just refresh the panels.
+        syncSelectionState();
+      }
+    }
+
+    function getSelectedVolume() {
+      return volumes.find((v) => v.id === selectedVolumeId) ?? null;
+    }
+
+    // Selection is mutually exclusive between splats and volumes — only
+    // one gizmo, one active selection at a time. Calling either of these
+    // with a valid id moves the gizmo to that target and clears the other
+    // kind of selection. Passing null deselects everything.
+    function selectObject(id) {
+      selectedObjectId = id;
+      selectedVolumeId = null;
+      syncSelectionState();
+    }
+    function selectVolume(id) {
+      selectedVolumeId = id;
+      selectedObjectId = null;
+      syncSelectionState();
+    }
+
+    function syncSelectionState() {
+      // Selected mesh paints correctly only with LOD off (so the mask
+      // indices line up). Apply the policy across the whole scene.
+      applyLodForAllMeshes();
+      syncSaveFilename();
+      renderObjectsPanel();
+      renderVolumesPanel?.();
+      refreshBrushAvailability?.();
+      // Attach the transform gizmo to whichever entity is selected —
+      // splat mesh or volume helper. Clears the gizmo when nothing is
+      // selected (id === null) so it disappears from the viewport.
+      const splat = getSelected();
+      const vol   = getSelectedVolume();
+      if (splat && splat.splatMesh) {
+        transformControls.attach(splat.splatMesh);
+        transformHelper.visible = true;
+      } else if (vol && vol.helper) {
+        transformControls.attach(vol.helper);
+        transformHelper.visible = true;
+      } else {
+        transformControls.detach();
+        transformHelper.visible = false;
+      }
+    }
+
+    function syncSaveFilename() {
+      // The save action exports the WHOLE scene (every loaded object),
+      // so the filename shouldn't follow the currently-selected splat.
+      // We only auto-fill it on the first object load — if the user has
+      // typed their own name, leave it alone.
+      if (!filenameCtl) return;
+      const isDefault =
+        ioOptions.filename === "shadow-scene" ||
+        ioOptions.filename === "shadow-splat" ||
+        !ioOptions.filename;
+      if (isDefault && objects.length === 1 && objects[0]?.name) {
+        ioOptions.filename = objects[0].name;
+        filenameCtl.updateDisplay();
+      } else if (objects.length === 0 && isDefault) {
+        ioOptions.filename = "shadow-scene";
+        filenameCtl.updateDisplay();
+      }
+    }
+
+    function pickSplatFile() {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = ".spz,.ply,.splat,.ksplat";
+      input.multiple = true;
+      input.onchange = async (e) => {
+        for (const file of e.target.files) {
+          await addObjectFromFile(file);
+        }
+      };
+      input.click();
+    }
+
+    browseBtn.addEventListener("click", pickSplatFile);
+
+    // -----------------------------------------------------------------------
+    // Objects panel — list of loaded splats with click-to-select + remove.
+    // The brush + reset + save all act on whichever object is selected.
+    // -----------------------------------------------------------------------
+    const objectsPanelEl = document.getElementById("objects-panel");
+    const objectsListEl  = document.getElementById("objects-list");
+    const objectsAddEl   = document.getElementById("objects-add");
+
+    function renderObjectsPanel() {
+      if (!hasObjects()) {
+        objectsPanelEl.classList.add("hidden");
+        return;
+      }
+      objectsPanelEl.classList.remove("hidden");
+      objectsListEl.innerHTML = "";
+      for (const obj of objects) {
+        const li = document.createElement("li");
+        li.dataset.id = obj.id;
+        li.title = `${obj.name} — click to select`;
+        if (obj.id === selectedObjectId) li.classList.add("selected");
+
+        const dot = document.createElement("span");
+        dot.className = "dot";
+        li.appendChild(dot);
+
+        const name = document.createElement("span");
+        name.className = "name";
+        name.textContent = obj.name;
+        li.appendChild(name);
+
+        const del = document.createElement("button");
+        del.className = "delete";
+        del.type = "button";
+        del.title = `Remove ${obj.name}`;
+        del.setAttribute("aria-label", `Remove ${obj.name}`);
+        del.textContent = "×";
+        del.addEventListener("click", (e) => {
+          e.stopPropagation();
+          removeObject(obj.id);
+        });
+        li.appendChild(del);
+
+        li.addEventListener("click", () => selectObject(obj.id));
+        objectsListEl.appendChild(li);
+      }
+    }
+
+    objectsAddEl.addEventListener("click", pickSplatFile);
+
+    // -----------------------------------------------------------------------
+    // Volumes panel — list of placed shadow primitives + add buttons.
+    //
+    // A volume is a Three.js Group containing two children:
+    //   • a faint solid shaded mesh (visual hint, no depth-write)
+    //   • a wireframe outline (so you can see edges through splats)
+    // The group itself is what the gizmo manipulates; its inverse world
+    // matrix is what feeds the shader (see syncVolumeUniforms).
+    // -----------------------------------------------------------------------
+    const volumesPanelEl = document.getElementById("volumes-panel");
+    const volumesListEl  = document.getElementById("volumes-list");
+    const addBoxBtn      = document.getElementById("volumes-add-box");
+    const addCylBtn      = document.getElementById("volumes-add-cyl");
+
+    // Highlight color for volume helpers — distinguishable from the splat
+    // bounds (which are not drawn) and from the brush gizmo (cyan-ish).
+    const VOLUME_COLOR_BASE     = 0xf4b860;
+    const VOLUME_COLOR_SELECTED = 0xff8800;
+
+    // Build the visual representation of a volume. The geometry sizes
+    // here are the SDF "unit" sizes — half-extent 0.5 cube and a
+    // cylinder of radius 0.5 / height 1, axis = Y. The user-visible
+    // size comes from helper.scale, which is what the gizmo edits.
+    function makeVolumeHelper(type) {
+      const group = new THREE.Group();
+      group.name = `shadow-volume-${type}`;
+
+      const geo = (type === "cylinder")
+        ? new THREE.CylinderGeometry(0.5, 0.5, 1, 32, 1)
+        : new THREE.BoxGeometry(1, 1, 1);
+
+      // Faint translucent solid — gives the volume "presence" without
+      // hiding splats behind it. depthWrite off so it never occludes
+      // the gizmo handles or the wireframe.
+      const solid = new THREE.Mesh(
+        geo,
+        new THREE.MeshBasicMaterial({
+          color: VOLUME_COLOR_BASE,
+          transparent: true,
+          opacity: 0.05,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        }),
+      );
+      solid.name = "volume-solid";
+
+      // Wireframe edge outline — clearer visual boundary than a flat
+      // alpha cube, especially against the gradient background.
+      const wire = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geo),
+        new THREE.LineBasicMaterial({
+          color: VOLUME_COLOR_BASE,
+          transparent: true,
+          opacity: 0.75,
+        }),
+      );
+      wire.name = "volume-wire";
+
+      group.add(solid);
+      group.add(wire);
+      return group;
+    }
+
+    // Update helper colors so the selected volume "lights up". Cheap —
+    // just a material color swap, no geometry rebuild.
+    function styleVolumeHelper(v) {
+      const isSel = v.id === selectedVolumeId;
+      const color = isSel ? VOLUME_COLOR_SELECTED : VOLUME_COLOR_BASE;
+      const wireOpacity  = isSel ? 1.0  : 0.7;
+      const solidOpacity = isSel ? 0.10 : 0.05;
+      v.helper.traverse((node) => {
+        if (!node.material) return;
+        node.material.color.setHex(color);
+        if (node.name === "volume-wire")  node.material.opacity = wireOpacity;
+        if (node.name === "volume-solid") node.material.opacity = solidOpacity;
+        node.material.needsUpdate = true;
+      });
+    }
+
+    // Drop a new volume in front of the camera at a comfortable size.
+    // Auto-selects so the gizmo immediately appears on the new volume,
+    // ready for the user to drag it into place.
+    function addVolume(type) {
+      if (volumes.length >= MAX_VOLUMES) {
+        showOverlay(`Max ${MAX_VOLUMES} shadow volumes`);
+        return;
+      }
+      const helper = makeVolumeHelper(type);
+
+      // Place ~3 units in front of the camera so it lands in view.
+      const fwd = new THREE.Vector3();
+      camera.getWorldDirection(fwd);
+      helper.position.copy(camera.position).addScaledVector(fwd, 3);
+      helper.scale.setScalar(1.0);
+
+      scene.add(helper);
+
+      const id = nextVolumeId++;
+      const idx = volumes.length;
+      const name = type === "cylinder"
+        ? `Cylinder ${idx + 1}`
+        : `Box ${idx + 1}`;
+      // parentId === null means the volume lives directly under the
+      // scene root. Setting it to a splat object's id reparents the
+      // helper under that SplatMesh, so the volume tags along whenever
+      // the parent moves / rotates / scales (the shader auto-tracks it
+      // because it uses the helper's matrixWorld every frame).
+      volumes.push({ id, name, type, helper, parentId: null });
+      styleVolumeHelper(volumes[volumes.length - 1]);
+      selectVolume(id);
+      showOverlay(`Added shadow ${type}`);
+    }
+
+    // Re-parent a volume's helper without visually shifting it. We use
+    // THREE.Object3D.attach (rather than .add) because attach decomposes
+    // the new local transform from the helper's CURRENT world matrix and
+    // the new parent's inverse world matrix — i.e. the helper stays put
+    // in world space while gaining a new parent. From then on, parent
+    // transforms compose into the helper's matrixWorld through the
+    // standard scene graph and the shader sees them automatically.
+    function setVolumeParent(volumeId, parentId) {
+      const v = volumes.find((x) => x.id === volumeId);
+      if (!v || !v.helper) return;
+      const parentObj = parentId != null
+        ? objects.find((o) => o.id === parentId)
+        : null;
+      const targetParent = parentObj?.splatMesh ?? scene;
+      // No-op if we're already under that parent — avoids a redundant
+      // matrix decomposition (which can introduce tiny float drift).
+      if (v.helper.parent === targetParent && v.parentId === (parentObj?.id ?? null)) return;
+      // Make sure both ends of the chain have fresh world matrices so
+      // attach() reads the right "before" world transform.
+      v.helper.updateMatrixWorld(true);
+      targetParent.updateMatrixWorld(true);
+      targetParent.attach(v.helper);
+      v.parentId = parentObj ? parentObj.id : null;
+    }
+
+    function removeVolume(id) {
+      const idx = volumes.findIndex((v) => v.id === id);
+      if (idx === -1) return;
+      const v = volumes[idx];
+      // Detach gizmo BEFORE removing from scene — TransformControls keeps
+      // a reference and will misbehave if its target disappears mid-frame.
+      if (transformControls.object === v.helper) {
+        transformControls.detach();
+        transformHelper.visible = false;
+      }
+      scene.remove(v.helper);
+      v.helper.traverse((node) => {
+        if (node.geometry) node.geometry.dispose();
+        if (node.material) node.material.dispose();
+      });
+      volumes.splice(idx, 1);
+      if (selectedVolumeId === id) selectedVolumeId = null;
+      syncVolumeUniforms();
+      renderVolumesPanel();
+      // Trigger a gizmo refresh in case the splat selection should now
+      // claim the gizmo back.
+      syncSelectionState();
+    }
+
+    function renderVolumesPanel() {
+      // Always visible once at least one volume exists, plus the buttons
+      // bar is always there at the bottom. Hide entirely when empty AND
+      // there are also no splats to keep the chrome minimal.
+      const showPanel = volumes.length > 0 || hasObjects();
+      volumesPanelEl.classList.toggle("hidden", !showPanel);
+
+      volumesListEl.innerHTML = "";
+      for (const v of volumes) {
+        const li = document.createElement("li");
+        li.dataset.id = v.id;
+        li.title = `${v.name} — click to select`;
+        if (v.id === selectedVolumeId) li.classList.add("selected");
+
+        // Top row: dot + name + delete (the click target for selection).
+        const main = document.createElement("div");
+        main.className = "row-main";
+        li.appendChild(main);
+
+        const dot = document.createElement("span");
+        dot.className = "dot";
+        dot.dataset.kind = v.type;
+        main.appendChild(dot);
+
+        const name = document.createElement("span");
+        name.className = "name";
+        name.textContent = v.name;
+        main.appendChild(name);
+
+        const del = document.createElement("button");
+        del.className = "delete";
+        del.type = "button";
+        del.title = `Remove ${v.name}`;
+        del.setAttribute("aria-label", `Remove ${v.name}`);
+        del.textContent = "×";
+        del.addEventListener("click", (e) => {
+          e.stopPropagation();
+          removeVolume(v.id);
+        });
+        main.appendChild(del);
+
+        // Bottom row: parent selector. Only meaningful when at least one
+        // splat exists in the scene; otherwise hide it (the volume is
+        // implicitly under the scene root).
+        if (hasObjects()) {
+          const meta = document.createElement("div");
+          meta.className = "row-meta";
+
+          const label = document.createElement("span");
+          label.className = "parent-label";
+          label.textContent = "Parent";
+          meta.appendChild(label);
+
+          const select = document.createElement("select");
+          select.className = "parent-select";
+          select.title = "Parent this volume to a splat object — it will follow the splat's transform";
+
+          const noneOpt = document.createElement("option");
+          noneOpt.value = "";
+          noneOpt.textContent = "(scene)";
+          select.appendChild(noneOpt);
+
+          for (const obj of objects) {
+            const opt = document.createElement("option");
+            opt.value = String(obj.id);
+            opt.textContent = obj.name;
+            if (obj.id === v.parentId) opt.selected = true;
+            select.appendChild(opt);
+          }
+          if (v.parentId == null) noneOpt.selected = true;
+
+          // stopPropagation so opening the dropdown doesn't trigger a
+          // row-click "select volume" — that would steal focus mid-edit.
+          select.addEventListener("click",     (e) => e.stopPropagation());
+          select.addEventListener("mousedown", (e) => e.stopPropagation());
+          select.addEventListener("change", (e) => {
+            // Splat object ids are strings (e.g. "obj-1"), so keep the
+            // raw string value here — converting via Number(...) would
+            // give NaN and the parent lookup would silently fall back
+            // to the scene root.
+            const raw = e.target.value;
+            const newParentId = raw === "" ? null : raw;
+            setVolumeParent(v.id, newParentId);
+            renderVolumesPanel();
+          });
+          meta.appendChild(select);
+
+          li.appendChild(meta);
+        }
+
+        li.addEventListener("click", () => selectVolume(v.id));
+        volumesListEl.appendChild(li);
+
+        styleVolumeHelper(v);
+      }
+    }
+
+    addBoxBtn.addEventListener("click", () => addVolume("box"));
+    addCylBtn.addEventListener("click", () => addVolume("cylinder"));
+
+    // -----------------------------------------------------------------------
+    // Gizmo mode toolbar — three buttons inside the Objects panel that swap
+    // the transform gizmo between Move / Rotate / Scale. Mirrored by the
+    // G / R / Y hotkeys and the Gizmo folder in the GUI.
+    // -----------------------------------------------------------------------
+    const gizmoToolbarBtns = document.querySelectorAll("#gizmo-toolbar .gz-btn");
+    gizmoToolbarBtns.forEach((btn) => {
+      btn.addEventListener("click", () => setGizmoMode(btn.dataset.gz));
+    });
+    function syncGizmoToolbar(mode) {
+      gizmoToolbarBtns.forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.gz === mode);
+      });
+    }
+
+    // Drag-and-drop anywhere on the page — but only for OS file drags.
+    // Without the `Files` check, in-page text/image drags (or selection
+    // drags during painting) would spuriously open the drop zone.
+    function dragHasFiles(e) {
+      const t = e.dataTransfer?.types;
+      if (!t) return false;
+      // DataTransferItemList / array — both expose includes via Array.from.
+      return Array.from(t).indexOf("Files") !== -1;
+    }
+    let dragDepth = 0;
+    window.addEventListener("dragenter", (e) => {
+      if (!dragHasFiles(e)) return;
+      e.preventDefault();
+      dragDepth++;
+      dropzoneEl.classList.remove("hidden");
+      dropzoneEl.classList.add("dragover");
+    });
+    window.addEventListener("dragover", (e) => {
+      if (!dragHasFiles(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    });
+    window.addEventListener("dragleave", (e) => {
+      if (!dragHasFiles(e)) return;
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) {
+        dropzoneEl.classList.remove("dragover");
+        if (hasObjects()) dropzoneEl.classList.add("hidden");
+      }
+    });
+    window.addEventListener("dragend", () => {
+      dragDepth = 0;
+      dropzoneEl.classList.remove("dragover");
+      if (hasObjects()) dropzoneEl.classList.add("hidden");
+    });
+    window.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      dragDepth = 0;
+      dropzoneEl.classList.remove("dragover");
+      const files = Array.from(e.dataTransfer?.files ?? []);
+      if (files.length === 0) {
+        if (hasObjects()) dropzoneEl.classList.add("hidden");
+        return;
+      }
+      // Drop multiple files in sequence — each becomes a new object.
+      for (const file of files) {
+        await addObjectFromFile(file);
+      }
+    });
+
+    // -----------------------------------------------------------------------
+    // Pointer interaction → updates brush ray and bakes paint each move
+    // -----------------------------------------------------------------------
+    const raycaster = new THREE.Raycaster();
+    let isDragging = false;
+    // Tracks the screen position and timestamp of the last bake so we can
+    // throttle stamps to STAMP_MIN_DIST_PX / STAMP_MIN_INTERVAL_MS.
+    let lastStampX = 0;
+    let lastStampY = 0;
+    let lastStampTime = 0;
+    function shouldStamp(event) {
+      const now = (typeof performance !== "undefined" && performance.now)
+        ? performance.now()
+        : Date.now();
+      const dx = event.clientX - lastStampX;
+      const dy = event.clientY - lastStampY;
+      const distSq = dx * dx + dy * dy;
+      if (distSq < STAMP_MIN_DIST_PX * STAMP_MIN_DIST_PX) return false;
+      if (now - lastStampTime < STAMP_MIN_INTERVAL_MS) return false;
+      lastStampX = event.clientX;
+      lastStampY = event.clientY;
+      lastStampTime = now;
+      return true;
+    }
+    function resetStampTracking(event) {
+      lastStampX = event.clientX;
+      lastStampY = event.clientY;
+      lastStampTime = (typeof performance !== "undefined" && performance.now)
+        ? performance.now()
+        : Date.now();
+    }
+
+    // Scratch state used by bakeCurrentRgba to transform the brush ray
+    // from world space into the selected mesh's object space (since the
+    // bake reads packed splat centers in object space).
+    const _bakeInvMat4 = new THREE.Matrix4();
+    const _bakeInvRot3 = new THREE.Matrix3();
+    const _bakeOrigin  = new THREE.Vector3();
+    const _bakeDir     = new THREE.Vector3();
+    const _bakeRight   = new THREE.Vector3();
+    const _bakeUp      = new THREE.Vector3();
+
+    function bakeCurrentRgba() {
+      // Brush only affects the currently selected object — that's the
+      // "click an asset to paint shadows on it" behavior in the UI.
+      const obj = getSelected();
+      if (!obj || !obj.splatMesh || !obj.shadowMask) return;
+
+      // Convert the world-space brush ray (set by updateBrushRay) into
+      // the mesh's OBJECT space. The bake reads splat centers from
+      // packedSplats which are in object space, so without this transform
+      // a gizmo-moved/rotated/scaled object would accept paint at the
+      // wrong world location. The next updateBrushRay call overwrites
+      // PARAMETERS back to world-space so this is safe to mutate.
+      obj.splatMesh.updateMatrixWorld();
+      _bakeInvMat4.copy(obj.splatMesh.matrixWorld).invert();
+      _bakeInvRot3.setFromMatrix4(_bakeInvMat4);
+
+      _bakeOrigin.copy(PARAMETERS.brushOrigin.value).applyMatrix4(_bakeInvMat4);
+      _bakeDir   .copy(PARAMETERS.brushDirection.value).applyMatrix3(_bakeInvRot3).normalize();
+      _bakeRight .copy(PARAMETERS.brushRight.value).applyMatrix3(_bakeInvRot3).normalize();
+      _bakeUp    .copy(PARAMETERS.brushUp.value).applyMatrix3(_bakeInvRot3).normalize();
+
+      PARAMETERS.brushOrigin.value.copy(_bakeOrigin);
+      PARAMETERS.brushDirection.value.copy(_bakeDir);
+      PARAMETERS.brushRight.value.copy(_bakeRight);
+      PARAMETERS.brushUp.value.copy(_bakeUp);
+
+      const oldMask = obj.shadowMask;
+      const newMask = new RgbaArray();
+      newMask.render({
+        renderer,
+        count: obj.splatMesh.packedSplats.numSplats,
+        reader: shadowMaskBakeDyno(
+          obj.splatMesh.packedSplats.dyno,
+          oldMask.dyno,
+        ),
+      });
+      oldMask.dispose();
+      obj.shadowMask = newMask;
+      // Re-bind the worldModifier to the new mask's dyno texture and
+      // rebuild the generator so the renderer picks it up.
+      obj.splatMesh.worldModifier = shadowDyno(obj.shadowMask.dyno);
+      obj.splatMesh.updateGenerator();
+    }
+
+    const _camWorldUp = new THREE.Vector3();
+    const _brushRight = new THREE.Vector3();
+    const _brushUp    = new THREE.Vector3();
+
+    function updateBrushRay(event) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      const ndc = new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      raycaster.setFromCamera(ndc, camera);
+      const dir = raycaster.ray.direction.clone().normalize();
+      PARAMETERS.brushDirection.value.set(dir.x, dir.y, dir.z);
+      PARAMETERS.brushOrigin.value.copy(raycaster.ray.origin);
+
+      // Build a screen-aligned basis perpendicular to the ray, so the square
+      // brush has its edges aligned with screen X/Y like users expect.
+      _camWorldUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+      _brushRight.crossVectors(dir, _camWorldUp);
+      if (_brushRight.lengthSq() < 1e-8) _brushRight.set(1, 0, 0);
+      _brushRight.normalize();
+      _brushUp.crossVectors(_brushRight, dir).normalize();
+      PARAMETERS.brushRight.value.copy(_brushRight);
+      PARAMETERS.brushUp.value.copy(_brushUp);
+    }
+
+    // Pointer routing strategy:
+    //   • Right / middle mouse drag → always orbits via Spark (any mode)
+    //   • Left mouse drag         → paints in brush modes, orbits in view
+    //   • Keyboard WASD/QE/arrows → always flies (handled by Spark FpsMovement)
+    //   • Click on gizmo handle  → always lets TransformControls drive
+    //   • Click in orbit mode    → picks/deselects a splat (selection)
+    // We use capture-phase listeners so we run BEFORE Spark's bubble-phase
+    // ones and can call stopImmediatePropagation to block its drag handling
+    // only when we're actively painting with the left mouse button.
+    const inPaintMode = () =>
+      PARAMETERS.shadowEnabled.value || PARAMETERS.undoEnabled.value;
+
+    // True if the cursor is currently hovering a gizmo handle. We let
+    // TransformControls fully own the click in that case (no painting,
+    // no click-select).
+    const overGizmoHandle = () =>
+      transformControls.axis !== null && transformControls.axis !== undefined;
+
+    // Click vs. drag tracking for the click-to-select feature.
+    let downX = 0, downY = 0, downMoved = false;
+    const CLICK_PX = 5; // px threshold for "still a click" vs. "drag"
+
+    renderer.domElement.addEventListener("pointermove", (event) => {
+      // Track movement even when no splat is selected — we still want
+      // click-vs-drag heuristics for the selection raycast below.
+      if (event.buttons & 1) {
+        const dx = event.clientX - downX;
+        const dy = event.clientY - downY;
+        if (dx * dx + dy * dy > CLICK_PX * CLICK_PX) downMoved = true;
+      }
+      if (gizmoDragging) return;
+      if (!getSelectedMesh()) return;
+      updateBrushRay(event);
+      if (isDragging && inPaintMode()) {
+        // Only deposit a new stamp when the cursor has moved far enough
+        // (or enough time has elapsed). Without this, slow drags pile up
+        // stamps on the same splats and produce dark blobs.
+        if (shouldStamp(event)) {
+          bakeCurrentRgba();
+        }
+        // Stop Spark from interpreting this move as continuing an orbit drag.
+        event.stopImmediatePropagation();
+      }
+    }, { capture: true });
+
+    renderer.domElement.addEventListener("pointerdown", (event) => {
+      // Drop focus from any lil-gui number input so subsequent WASD keys
+      // aren't silently swallowed by the input. FpsMovement listens at
+      // the document level but inputs can still consume the relevant
+      // keystrokes before the document handler sees them.
+      if (document.activeElement instanceof HTMLInputElement) {
+        document.activeElement.blur();
+      }
+      // Reset click-vs-drag tracking on every primary press.
+      if (event.button === 0) {
+        downX = event.clientX;
+        downY = event.clientY;
+        downMoved = false;
+      }
+      // Hovering a gizmo handle → let TransformControls handle this entirely.
+      // Only disable orbit when it's a primary (left) click — right-click
+      // on a gizmo handle should still orbit because TransformControls
+      // ignores non-primary buttons.
+      if (overGizmoHandle()) {
+        if (event.button === 0) {
+          // Treat as "moved" so the corresponding pointerup doesn't fire
+          // click-to-select, and pre-emptively kill Spark's mouse orbit so
+          // the camera doesn't wobble during the gizmo drag.
+          downMoved = true;
+          setOrbitEnabled(false);
+          return;
+        }
+      }
+      if (!getSelectedMesh()) return;
+      // Only intercept primary (left) clicks in paint mode. Right/middle
+      // clicks pass through so Spark can orbit/slide even while a brush is
+      // selected.
+      const isPrimary = event.button === 0;
+      if (!isPaintModeAllowed(event) || !isPrimary || !inPaintMode()) return;
+      isDragging = true;
+      updateBrushRay(event);
+      // Drop a single stamp on click and seed the throttler from this spot.
+      resetStampTracking(event);
+      bakeCurrentRgba();
+      event.stopImmediatePropagation();
+    }, { capture: true });
+
+    function isPaintModeAllowed(event) {
+      // Touch is handled by Spark as rotate by default; we still let touch
+      // paint when in brush mode by not bailing out here.
+      return true;
+    }
+
+    // Pick the closest selectable thing under a pointer event — could be
+    // a SplatMesh or a shadow-volume helper. Returns either
+    // { kind: "splat",  obj } or { kind: "volume", obj }, or null. We pick
+    // by closest distance regardless of kind so the user can click through
+    // a translucent volume to select the splat behind it (if the splat is
+    // closer at that screen pixel) and vice versa.
+    function pickObjectAtPointer(event) {
+      if (objects.length === 0 && volumes.length === 0) return null;
+      const rect = renderer.domElement.getBoundingClientRect();
+      const ndc = new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      raycaster.setFromCamera(ndc, camera);
+
+      // Splat hits.
+      let bestSplat = null;
+      const splatHits = [];
+      for (const obj of objects) {
+        if (!obj.splatMesh) continue;
+        try { obj.splatMesh.raycast(raycaster, splatHits); } catch (_) { /* ignore */ }
+      }
+      if (splatHits.length) {
+        splatHits.sort((a, b) => a.distance - b.distance);
+        const owner = objects.find((o) => o.splatMesh === splatHits[0].object);
+        if (owner) bestSplat = { dist: splatHits[0].distance, obj: owner };
+      }
+
+      // Volume hits — raycast against the helper Group; the solid mesh
+      // catches the rays, the wireframe is ignored (LineSegments don't
+      // have a meaningful "fill" hit).
+      let bestVol = null;
+      for (const v of volumes) {
+        if (!v.helper) continue;
+        const volHits = raycaster.intersectObject(v.helper, true);
+        if (volHits.length === 0) continue;
+        const closest = volHits[0].distance;
+        if (!bestVol || closest < bestVol.dist) bestVol = { dist: closest, obj: v };
+      }
+
+      // Prefer splat hits — volume helpers are translucent, so if both
+      // get hit at roughly the same screen pixel the user usually meant
+      // the splat behind the volume. To select a volume directly: click
+      // the panel row, or click on empty space inside the wireframe (no
+      // splat there → volume hit wins by default).
+      if (bestSplat) return { kind: "splat",  obj: bestSplat.obj };
+      if (bestVol)   return { kind: "volume", obj: bestVol.obj };
+      return null;
+    }
+
+    renderer.domElement.addEventListener("pointerup", (event) => {
+      isDragging = false;
+      if (event.button !== 0) return;
+      // Don't treat a gizmo / brush drag as a "click" on something.
+      if (gizmoDragging || downMoved) return;
+      // In paint modes, clicking does brush stamping, not selection.
+      if (inPaintMode()) return;
+      // If the click was on a gizmo handle, TransformControls handled it.
+      if (overGizmoHandle()) return;
+      // Click in orbit mode → pick whatever's under the cursor (splat or
+      // volume), or deselect everything if it's empty space.
+      const hit = pickObjectAtPointer(event);
+      if (!hit)                      selectObject(null);
+      else if (hit.kind === "splat") selectObject(hit.obj.id);
+      else                           selectVolume(hit.obj.id);
+    }, { capture: true });
+
+    const endDrag = () => { isDragging = false; };
+    renderer.domElement.addEventListener("pointercancel", endDrag, { capture: true });
+    renderer.domElement.addEventListener("pointerleave", endDrag);
+
+    // -----------------------------------------------------------------------
+    // GUI
+    // -----------------------------------------------------------------------
+    const gui = new GUI({ title: "Shadow Brush" });
+
+    const brushFolder = gui.addFolder("Brush");
+    brushFolder
+      .add(PARAMETERS, "brushShape", { Circle: "circle", Square: "square" })
+      .name("Shape")
+      .onChange((v) => { PARAMETERS.brushSquare.value = v === "square"; });
+    const radiusCtl = brushFolder
+      .add(PARAMETERS.brushRadius, "value", MIN_BRUSH_RADIUS, MAX_BRUSH_RADIUS, 0.005)
+      .name("Size");
+    const depthCtl = brushFolder
+      .add(PARAMETERS.brushDepth, "value", MIN_BRUSH_DEPTH, MAX_BRUSH_DEPTH, 0.1)
+      .name("Depth");
+    brushFolder.open();
+
+    const gizmoFolder = gui.addFolder("Gizmo");
+    const gizmoUI = {
+      mode: "translate",
+      space: "world",
+      size: 0.85,
+    };
+    gizmoFolder
+      .add(gizmoUI, "mode", { Translate: "translate", Rotate: "rotate", Scale: "scale" })
+      .name("Mode")
+      .onChange((v) => { transformControls.setMode(v); syncGizmoToolbar(v); });
+    gizmoFolder
+      .add(gizmoUI, "space", { World: "world", Local: "local" })
+      .name("Space")
+      .onChange((v) => { transformControls.setSpace(v); });
+    gizmoFolder
+      .add(gizmoUI, "size", 0.4, 1.6, 0.05)
+      .name("Size")
+      .onChange((v) => { transformControls.size = v; });
+    gizmoFolder.open();
+
+    const sceneFolder = gui.addFolder("Scene");
+    // LOD is global — when toggled we rebuild every loaded object so they
+    // all use the new LOD setting. Each object remembers its source File
+    // so we can re-add it without prompting the user again.
+    const reloadAllObjects = async (toastLabel) => {
+      if (!hasObjects()) return;
+      showOverlay(toastLabel);
+      const previouslySelected = selectedObjectId;
+      const snapshot = objects.map((o) => ({ id: o.id, file: o.file }));
+      // Remove existing
+      for (const o of [...objects]) removeObject(o.id);
+      // Re-add in original order
+      for (const s of snapshot) {
+        if (s.file) await addObjectFromFile(s.file);
+      }
+      // Try to keep the same selection (id may differ; match by index).
+      const matchIdx = snapshot.findIndex((s) => s.id === previouslySelected);
+      if (matchIdx >= 0 && objects[matchIdx]) {
+        selectObject(objects[matchIdx].id);
+      }
+    };
+    sceneFolder
+      .add(LOD, "enabled")
+      .name("LOD (fast 40M+ splats)")
+      .onChange(() => {
+        refreshBrushAvailability();
+        // Turning LOD OFF is a one-line flip per mesh (no reload).
+        // Turning LOD ON requires the LOD pyramid to actually exist on
+        // the loaded meshes — for any mesh that was loaded with LOD off,
+        // we have to rebuild it. Cheaper case (was loaded with LOD on)
+        // also goes through reload, which is acceptable since the user
+        // explicitly opted in.
+        if (LOD.enabled) {
+          reloadAllObjects("LOD on");
+        } else {
+          applyLodForAllMeshes();
+          showOverlay("LOD off");
+        }
+      });
+    sceneFolder
+      .add(LOD, "quality", 1.1, 2.0, 0.05)
+      .name("LOD detail (1.1=sharp)")
+      .onFinishChange(() => { if (LOD.enabled) reloadAllObjects("Rebuilding LOD…"); });
+    sceneFolder.open();
+
+    const shadowFolder = gui.addFolder("Shadow");
+    // UI proxy for the darkness slider so the slider direction matches the
+    // user's intuition: 0 = no shadow (light), 0.5 = strong shadow.
+    // Internally `PARAMETERS.darkness` is 1 - strength because we paint by
+    // multiplying RGB per stroke.
+    const shadowUI = { strength: 1.0 - PARAMETERS.darkness.value };
+    shadowFolder
+      .add(shadowUI, "strength", 0.0, 0.5, 0.005)
+      .name("Shadow strength")
+      .onChange((v) => { PARAMETERS.darkness.value = 1.0 - v; });
+    shadowFolder
+      .add(PARAMETERS.flow, "value", 0.02, 1.0, 0.01)
+      .name("Flow (per-stamp)");
+    shadowFolder
+      .add(PARAMETERS.edgeSoftness, "value", 0.0, 1.0, 0.01)
+      .name("Edge softness");
+    shadowFolder
+      .add(PARAMETERS.coolTint, "value", 0.0, 1.0, 0.01)
+      .name("Cool tint (skylight)");
+    shadowFolder.open();
+
+    // ---- Shadow volumes folder ------------------------------------------
+    // Global style controls for the box / cylinder shadow primitives.
+    // The `addVolume` calls double as a way to add volumes from the GUI
+    // for users who prefer the controls over the on-screen panel.
+    const volumesFolder = gui.addFolder("Shadow volumes");
+    volumesFolder
+      .add(volumeStyle, "intensity", 0.0, 1.0, 0.01)
+      .name("Intensity (center)");
+    volumesFolder
+      .add(volumeStyle, "softness", 0.05, 0.5, 0.01)
+      .name("Edge softness");
+    const volumeActions = {
+      addBox:      () => addVolume("box"),
+      addCylinder: () => addVolume("cylinder"),
+      removeAll:   () => {
+        // Iterate over a copy — removeVolume mutates the array.
+        for (const v of [...volumes]) removeVolume(v.id);
+      },
+    };
+    // Mark these as "add" buttons (dashed amber) and the cleanup as a
+    // "danger" button (red tint) so the visual hierarchy matches intent.
+    const addBoxCtl  = volumesFolder.add(volumeActions, "addBox").name("+ Add box");
+    const addCylCtl  = volumesFolder.add(volumeActions, "addCylinder").name("+ Add cylinder");
+    const removeAllCtl = volumesFolder.add(volumeActions, "removeAll").name("Remove all volumes");
+    addBoxCtl.domElement.classList.add("add-btn");
+    addCylCtl.domElement.classList.add("add-btn");
+    removeAllCtl.domElement.classList.add("danger-action");
+    volumesFolder.open();
+
+    const actions = {
+      resetAll: async () => {
+        const obj = getSelected();
+        if (!obj || !obj.splatMesh || !obj.shadowMask) return;
+        // Reset the SELECTED object's shadow mask to all (1,1,1,1) —
+        // splatRgba (the immutable base color) doesn't need to change.
+        // Other objects are not affected.
+        const fresh = makeAllOnesRgbaArray(obj.splatMesh.packedSplats.numSplats);
+        obj.shadowMask.dispose();
+        obj.shadowMask = fresh;
+        obj.splatMesh.worldModifier = shadowDyno(obj.shadowMask.dyno);
+        obj.splatMesh.updateGenerator();
+        showOverlay(`Reset · ${obj.name}`);
+      },
+      loadSplat: pickSplatFile,
+    };
+    const resetCtl = gui.add(actions, "resetAll").name("Reset shadows on selection");
+    const loadCtl  = gui.add(actions, "loadSplat").name("Add object (.spz/.ply)");
+    resetCtl.domElement.classList.add("danger-action");
+    loadCtl.domElement.classList.add("add-btn");
+
+    // ---- Save / Export ---------------------------------------------------
+    //
+    // Saves EVERY loaded object — combined into a single SPZ file in
+    // world space. Each object's gizmo placement (translation / rotation
+    // / scale) is baked into its splats so the exported file looks
+    // identical to what the user sees in the viewport. Shadow brush
+    // strokes and shadow-volume contributions are already part of the
+    // generator's RGBA output, so they come along for free.
+    var ioOptions = {
+      filename: "shadow-scene",
+      // Painted/shadowed splats don't preserve SH coefficients, so degree 0.
+      maxSh: 0,
+      // Smaller fractionalBits = lower precision but less clipping. 12 = default.
+      fractionalBits: 12,
+      saveSpz: async () => {
+        if (objects.length === 0) {
+          alert("No objects loaded.");
+          return;
+        }
+        const meshObjects = objects.filter((o) => o.splatMesh);
+        if (meshObjects.length === 0) {
+          alert("Objects are still loading — try again in a moment.");
+          return;
+        }
+
+        try {
+          showOverlay(
+            `Saving scene · ${meshObjects.length} object${meshObjects.length > 1 ? "s" : ""}…`,
+          );
+
+          // 1. Bake the live shadowed RGBA for every loaded object. We
+          //    do this BEFORE writing so we know the total live splat
+          //    count up front (SpzWriter wants it at construction).
+          //    The reader simply taps the live generator output, so the
+          //    saved colors / shadows are exactly what the user sees in
+          //    the viewport at save time.
+          const baked = [];
+          for (const obj of meshObjects) {
+            const rgba = new RgbaArray();
+            rgba.render({
+              renderer,
+              count: obj.splatMesh.packedSplats.numSplats,
+              reader: dyno.dynoBlock({ index: "int" }, { rgba8: "vec4" }, ({ index }) => {
+                const { gsplat } = obj.splatMesh.generator.apply({ index });
+                const { rgba: rgba8 } = dyno.splitGsplat(gsplat).outputs;
+                return { rgba8 };
+              }),
+            });
+            const rgbaBytes = await rgba.read();
+            baked.push({ obj, rgbaBytes });
+          }
+
+          // 2. Count live splats (alpha > 0) across all objects.
+          let totalLive = 0;
+          for (const { rgbaBytes } of baked) {
+            for (let i = 0; i < rgbaBytes.length; i += 4) {
+              if (rgbaBytes[i + 3] > 0) totalLive++;
+            }
+          }
+          if (totalLive === 0) {
+            alert("Nothing to save — every splat is fully transparent.");
+            return;
+          }
+
+          // 3. One writer, fed every object's splats transformed into
+          //    world space by their respective splatMesh.matrixWorld.
+          const writer = new SpzWriter({
+            numSplats: totalLive,
+            shDegree: ioOptions.maxSh,
+            fractionalBits: ioOptions.fractionalBits,
+            flagAntiAlias: true,
+          });
+
+          // Scratch values reused across the whole loop — splat counts
+          // can be large (10M+ on a busy scene) so we don't want to be
+          // creating Vector3 / Quaternion per-splat in the hot path.
+          const _objQuat   = new THREE.Quaternion();
+          const _objPos    = new THREE.Vector3();
+          const _objScale  = new THREE.Vector3();
+          const _splatPos  = new THREE.Vector3();
+          const _splatQuat = new THREE.Quaternion();
+          const _splatScl  = new THREE.Vector3();
+
+          let writeIdx = 0;
+          for (const { obj, rgbaBytes } of baked) {
+            obj.splatMesh.updateMatrixWorld(true);
+            obj.splatMesh.matrixWorld.decompose(_objPos, _objQuat, _objScale);
+
+            // Gaussian splats are anisotropic, so a fully-correct
+            // non-uniform parent scale would require composing the
+            // covariance per splat (M·Σ·Mᵀ) and re-decomposing. Users
+            // almost always uniform-scale via the gizmo, so we collapse
+            // any drift to the average — exact for uniform scales,
+            // close enough for mild non-uniform ones, and (importantly)
+            // matches what the live tool view shows because Spark's own
+            // gsplat path averages too.
+            const sScale = (_objScale.x + _objScale.y + _objScale.z) / 3;
+
+            const ogSplats = obj.splatMesh.packedSplats;
+            const totalSplats = ogSplats.numSplats;
+
+            for (let i = 0; i < totalSplats; i++) {
+              const off = i * 4;
+              const opacity = rgbaBytes[off + 3] / 255;
+              if (opacity === 0) continue;
+
+              const u = unpackSplat(ogSplats.packedArray, i, ogSplats.splatEncoding);
+
+              // Apply the parent's world transform to the splat
+              // geometry: position by full matrixWorld, orientation by
+              // composed quaternion, scale by the uniform multiplier.
+              _splatPos.copy(u.center).applyMatrix4(obj.splatMesh.matrixWorld);
+              _splatQuat.copy(_objQuat).multiply(u.quaternion);
+              _splatScl.copy(u.scales).multiplyScalar(sScale);
+
+              writer.setCenter(writeIdx, _splatPos.x, _splatPos.y, _splatPos.z);
+              writer.setScale(writeIdx,  _splatScl.x, _splatScl.y, _splatScl.z);
+              writer.setQuat(writeIdx,
+                _splatQuat.x, _splatQuat.y, _splatQuat.z, _splatQuat.w,
+              );
+              writer.setAlpha(writeIdx, opacity);
+              writer.setRgb(writeIdx,
+                rgbaBytes[off + 0] / 255,
+                rgbaBytes[off + 1] / 255,
+                rgbaBytes[off + 2] / 255,
+              );
+              writeIdx++;
+            }
+          }
+
+          const bytes = await writer.finalize();
+          if (writer.clippedCount > 0) {
+            console.warn(
+              `${writer.clippedCount} splats clipped during SPZ encode — `
+              + `lower fractionalBits if this matters.`,
+            );
+          }
+
+          const safeName = (ioOptions.filename || "shadow-scene")
+            .replace(/[^\w.-]+/g, "_");
+          const blob = new Blob([bytes], { type: "application/octet-stream" });
+          const link = document.createElement("a");
+          link.href = URL.createObjectURL(blob);
+          link.download = `${safeName}-shadowed.spz`;
+          link.click();
+          URL.revokeObjectURL(link.href);
+
+          showOverlay(`Saved · ${totalLive.toLocaleString()} splats`);
+        } catch (err) {
+          console.error("SPZ export failed", err);
+          alert(`Save failed: ${err.message}\nSee console for details.`);
+        }
+      },
+    };
+
+    const ioFolder = gui.addFolder("Save");
+    var filenameCtl = ioFolder.add(ioOptions, "filename").name("Filename");
+    ioFolder.add(ioOptions, "fractionalBits", 8, 16, 1).name("SPZ precision");
+    const saveCtl = ioFolder.add(ioOptions, "saveSpz").name("Save shadowed SPZ");
+    saveCtl.domElement.classList.add("primary-action");
+    ioFolder.open();
+
+    // -----------------------------------------------------------------------
+    // Mode handling
+    // -----------------------------------------------------------------------
+    const overlay = document.getElementById("mode-overlay");
+    let overlayTimer;
+    function showOverlay(text) {
+      overlay.textContent = text;
+      overlay.classList.add("show");
+      clearTimeout(overlayTimer);
+      overlayTimer = setTimeout(() => overlay.classList.remove("show"), 1400);
+    }
+
+    const modeButtons = document.querySelectorAll(".mode-btn");
+    function setMode(mode) {
+      // Brush modes require an object to be selected — paints only
+      // affect the currently selected object. We also force LOD off on
+      // the selected mesh (see applyLodForMesh) so the per-splat mask
+      // indexes line up with the rendered splats; this is what makes the
+      // brush actually paint the splats the user clicks on.
+      if ((mode === "shadow" || mode === "undo") && !getSelected()) {
+        showOverlay("Select an object first");
+        return;
+      }
+      PARAMETERS.shadowEnabled.value = mode === "shadow";
+      PARAMETERS.undoEnabled.value   = mode === "undo";
+      // Keep Spark controls active in every mode so WASD/QE/arrow-key fly
+      // and right-click orbit always work — left-click paint vs orbit is
+      // routed by our capture-phase pointer handlers above. (Pointer-orbit
+      // toggles separately when the gizmo is being dragged; see
+      // setOrbitEnabled / dragging-changed.)
+      if (controls.fpsMovement) controls.fpsMovement.enable = true;
+      if (!gizmoDragging) setOrbitEnabled(true);
+      canvas.classList.toggle("painting", mode !== "view");
+      modeButtons.forEach((btn) =>
+        btn.classList.toggle("active", btn.dataset.mode === mode),
+      );
+      const labels = { shadow: "Shadow Mode", undo: "Undo Mode", view: "Orbit Mode" };
+      showOverlay(labels[mode]);
+    }
+    function refreshBrushAvailability() {
+      const noSelection = !getSelected();
+      modeButtons.forEach((btn) => {
+        const m = btn.dataset.mode;
+        const isPaint = m === "shadow" || m === "undo";
+        const disabled = isPaint && noSelection;
+        btn.toggleAttribute("disabled", disabled);
+        btn.title = !isPaint || !disabled
+          ? ""
+          : "Select an object to paint on";
+      });
+      // If we're currently in a paint mode but the selection has been
+      // cleared, fall back to view.
+      if (noSelection
+          && (PARAMETERS.shadowEnabled.value || PARAMETERS.undoEnabled.value)) {
+        setMode("view");
+      }
+    }
+    modeButtons.forEach((btn) =>
+      btn.addEventListener("click", () => {
+        if (btn.hasAttribute("disabled")) return;
+        setMode(btn.dataset.mode);
+      }),
+    );
+    setMode("view");
+    refreshBrushAvailability();
+
+    function setGizmoMode(m) {
+      gizmoUI.mode = m;
+      transformControls.setMode(m);
+      // Mirror the selection across the GUI dropdown AND the Objects-panel toolbar.
+      gizmoFolder?.controllers?.find((c) => c.property === "mode")?.updateDisplay();
+      syncGizmoToolbar(m);
+      const labels = { translate: "Translate", rotate: "Rotate", scale: "Scale" };
+      showOverlay(`Gizmo · ${labels[m]}`);
+    }
+
+    window.addEventListener("keydown", (event) => {
+      if (event.target instanceof HTMLInputElement) return;
+      // Gizmo mode hotkeys (Blender-style). Only fire when an asset is
+      // selected — otherwise the keys are no-ops and forward to flycam.
+      if (getSelected() && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        const k = event.key.toLowerCase();
+        if (k === "g") { setGizmoMode("translate"); event.preventDefault(); return; }
+        if (k === "r") { setGizmoMode("rotate");    event.preventDefault(); return; }
+        // Avoid clashing with Shift held for "fly faster"; only plain "t"/"y" trigger scale.
+        if (k === "y") { setGizmoMode("scale");     event.preventDefault(); return; }
+      }
+      switch (event.key) {
+        case "1": setMode("shadow"); break;
+        case "2": setMode("undo");   break;
+        case "Escape": setMode("view"); break;
+        case "=": case "+": {
+          PARAMETERS.brushRadius.value = Math.min(
+            PARAMETERS.brushRadius.value + 0.01, MAX_BRUSH_RADIUS,
+          );
+          radiusCtl.updateDisplay();
+          break;
+        }
+        case "-": case "_": {
+          PARAMETERS.brushRadius.value = Math.max(
+            PARAMETERS.brushRadius.value - 0.01, MIN_BRUSH_RADIUS,
+          );
+          radiusCtl.updateDisplay();
+          break;
+        }
+        case "]": {
+          PARAMETERS.brushDepth.value = Math.min(
+            PARAMETERS.brushDepth.value + 0.5, MAX_BRUSH_DEPTH,
+          );
+          depthCtl.updateDisplay();
+          break;
+        }
+        case "[": {
+          PARAMETERS.brushDepth.value = Math.max(
+            PARAMETERS.brushDepth.value - 0.5, MIN_BRUSH_DEPTH,
+          );
+          depthCtl.updateDisplay();
+          break;
+        }
+      }
+    });
+
+    // -----------------------------------------------------------------------
+    // Render loop
+    // -----------------------------------------------------------------------
+    renderer.setAnimationLoop(() => {
+      controls.update(camera);
+      // Pull every volume's helper transform into the shader uniforms.
+      // Doing this every frame (cheap — 16 mat4 inverts max) means the
+      // gizmo dragging just works: the volume re-darkens splats live.
+      syncVolumeUniforms();
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>

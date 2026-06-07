@@ -1,0 +1,10 @@
+{
+  "name": "shadow-splat-brush",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A tiny three.js + Spark 2.1 web app with a brush tool that casts hue-preserving shadows on Gaussian splats by darkening them per-channel.",
+  "scripts": {
+    "start": "npx --yes serve -l 4321 .",
+    "dev": "npx --yes serve -l 4321 ."
+  }
+}
