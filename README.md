@@ -1,6 +1,6 @@
 # Shadow
 
-**Live demo:** <https://shadow-splat-tool.netlify.app>
+**Live demo:** <https://splat-shadow-tool.netlify.app>
 
 A tiny [three.js](https://threejs.org/) + [Spark 2.1](https://sparkjs.dev/) web app
 with a single brush tool that casts **shadows** on a 3D Gaussian Splat scene by
