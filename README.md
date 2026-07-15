@@ -80,35 +80,45 @@ volumes** panel at the bottom right:
 
 Each volume is a normal scene object, so the same gizmo lets you
 **move / rotate / scale** it (click its row in the panel, or click the
-wireframe in the viewport). Splats anywhere in the scene that fall
-inside the volume get darkened with a smooth SDF falloff — darkest at
-the center, fading to no effect at the edge.
+wireframe in the viewport). Splats that fall inside the volume get
+darkened with a smooth SDF falloff — darkest at the center, fading to
+no effect at the edge.
 
-Two global sliders in the GUI **Shadow volumes** folder shape the look
-for every volume:
+**Every volume is tuned independently.** Rather than a slider on every
+row, the **Shadow volumes** panel has a single pair of sliders that
+retarget to whichever volume is currently selected (click a row, or
+click the wireframe in the viewport). Adjusting them affects only that
+one volume:
 
-- **Intensity (center)** — `0` = no shadow, `1` = pure black at the
-  volume's center.
-- **Edge softness** — controls how wide the smooth falloff zone is in
-  the volume's local space. Larger = softer / cloudier shadow. Smaller =
+- **Intensity** — `0` = no shadow, `1` = pure black at the volume's
+  center.
+- **Softness** — controls how wide the smooth falloff zone is in the
+  volume's local space. Larger = softer / cloudier shadow. Smaller =
   hard interior with quick falloff at the edge.
 
-Volumes apply globally — they shadow every loaded splat regardless of
-which one is selected — and they stack with the brush mask (a splat
-inside a volume AND painted by the brush gets both effects). When you
-**Save shadowed SPZ**, the volume contribution is baked in too, so the
+By default a volume is global — it shadows every loaded splat. To make
+a volume affect **only one object**, set its **Parent** to that object
+(see below): the shadow is then scoped to that object alone, so you can
+give each box its own volumes without darkening the others. Volumes
+stack with the brush mask (a splat inside a volume AND painted by the
+brush gets both effects). When you **Save shadowed SPZ**, each volume's
+contribution is baked into whichever objects it affects, so the
 exported file already has the shadow burned into the splat colors.
 
-The shader supports up to `MAX_VOLUMES` (16) at once.
+The shader supports up to `MAX_VOLUMES` (32) at once.
 
 ### Parenting volumes to objects
 
 Each volume row has a **Parent** dropdown that lets you attach the
 volume to one of the loaded splat objects (or leave it under the scene
-root with `(scene)`). When parented, the volume becomes a child of the
-splat's transform — moving, rotating, or scaling the splat with the
-gizmo carries the volume along with it, so the shadow stays glued to
-the object.
+root with `(scene)`). Parenting does two things:
+
+1. **Scopes the shadow** — a parented volume darkens **only** that
+   object, leaving every other splat untouched. `(scene)` makes it
+   global again (darkens everything).
+2. **Follows the transform** — moving, rotating, or scaling the splat
+   with the gizmo carries the volume along with it, so the shadow stays
+   glued to the object.
 
 Parenting is a true scene-graph relationship (`Object3D.attach`),
 which means:

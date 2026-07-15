@@ -533,6 +533,49 @@
       font-size: 11px;
       color: var(--text-dim);
     }
+    /* Single style panel for the currently-selected volume — one pair of
+       sliders that retargets to whatever volume is selected, instead of
+       cluttering every row. */
+    #volume-style {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      margin-top: 8px;
+      padding: 9px 10px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border);
+    }
+    #volume-style.hidden { display: none; }
+    #volume-style .vol-style-head {
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent-hi);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #volume-style .vol-slider {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+    }
+    #volume-style .vol-slider-label {
+      flex: 0 0 60px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      font-size: 10px;
+      color: var(--text-dim);
+    }
+    #volume-style .vol-slider input[type=range] {
+      flex: 1 1 auto;
+      min-width: 0;
+      height: 14px;
+      cursor: pointer;
+      accent-color: var(--accent-hi);
+    }
     #volumes-list .parent-label {
       flex: 0 0 auto;
       letter-spacing: 0.06em;
@@ -876,6 +919,17 @@
   <div id="volumes-panel" class="ui-layer glass hidden">
     <div class="panel-label">Shadow volumes</div>
     <ul id="volumes-list"></ul>
+    <div id="volume-style" class="hidden">
+      <div class="vol-style-head" id="vol-style-head">Selected volume</div>
+      <label class="vol-slider">
+        <span class="vol-slider-label">Intensity</span>
+        <input id="vol-intensity" type="range" min="0" max="1" step="0.01" value="0.6">
+      </label>
+      <label class="vol-slider">
+        <span class="vol-slider-label">Softness</span>
+        <input id="vol-softness" type="range" min="0" max="1" step="0.01" value="0.4">
+      </label>
+    </div>
     <div id="volumes-add">
       <button id="volumes-add-box" type="button" title="Add a box-shaped shadow volume">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
@@ -961,6 +1015,8 @@
       SpzWriter,
       PackedSplats,
       unpackSplat,
+      SplatEdit,
+      SplatEditSdf,
     } from "@sparkjsdev/spark";
     import { GUI } from "lil-gui";
 
@@ -1068,12 +1124,39 @@
     // renders fine without it.
     const LOD = { enabled: false, quality: 1.3 };
 
+    // True when a mesh was CONSTRUCTED with the LOD pyramid. Critical
+    // discovery (verified empirically with a headless Spark load): for
+    // such meshes `packedSplats` is left EMPTY (numSplats = 0) and ALL
+    // splat data — originals + merged pyramid nodes — lives in the
+    // separate `packedSplats.lodSplats` collection. Consequences:
+    //   • Setting enableLod = false on such a mesh renders NOTHING
+    //     (the base path reads the empty packedSplats) — this was the
+    //     source of the recurring "black screen" reports.
+    //   • Our per-splat shadow masks / splatRgba / SPZ export all index
+    //     into packedSplats, so none of them can work on these meshes.
+    // Painting and saving therefore require LOD to be OFF (which now
+    // reloads meshes cleanly — see the GUI toggle).
+    function isLodBuiltMesh(mesh) {
+      return !!mesh && (
+        mesh.packedSplats?.lodSplats != null ||
+        (mesh.packedSplats?.numSplats ?? 0) === 0
+      );
+    }
+
     // Push the selection-aware LOD policy onto a single mesh + the whole
     // scene. Called whenever selection or the global LOD toggle changes;
     // toggling `enableLod` at runtime is a single uniform flip in Spark
     // (it auto-rebuilds the generator on the next frame) so this is cheap.
     function applyLodForMesh(obj) {
       if (!obj || !obj.splatMesh) return;
+      // LOD-built meshes MUST keep enableLod = true — their base splat
+      // array is empty, so the non-LOD render path shows nothing at all
+      // (black screen). Selection no longer flips them; painting on them
+      // is disabled instead (see refreshBrushAvailability).
+      if (isLodBuiltMesh(obj.splatMesh)) {
+        if (obj.splatMesh.enableLod !== true) obj.splatMesh.enableLod = true;
+        return;
+      }
       const isSelected = obj.id === selectedObjectId;
       const desired = LOD.enabled && !isSelected;
       if (obj.splatMesh.enableLod !== desired) {
@@ -1085,135 +1168,110 @@
     }
 
     // -----------------------------------------------------------------------
-    // SHADOW VOLUMES
+    // SHADOW VOLUMES (Spark SplatEdit / SplatEditSdf)
     //
     // In addition to the per-splat brush, the user can drop simple
     // geometric "shadow volumes" (boxes / cylinders) into the scene. Any
     // splat in any loaded object that falls inside a volume gets darkened,
     // with a smooth falloff from the edge to the center.
     //
-    // Each volume is a Three.js Object3D (so the existing gizmo can move /
-    // rotate / scale it directly). Inside the worldModifier shader we
-    // transform each splat's WORLD-space center by the volume's inverse
-    // world matrix, which puts the splat into a unit-sized local space:
-    //   Box      : signed distance to the [-0.5, 0.5]^3 cube
-    //   Cylinder : signed distance to a cylinder (radius 0.5, height 1, Y axis)
-    // The helper geometry matches those dimensions, so the gizmo's scale
-    // directly controls the volume's effective extent. The brush mask is
-    // unchanged; the volume factor just multiplies on top of it.
+    // Architecture: every volume is a `SplatEditSdf` (a THREE.Object3D
+    // subclass shipped by Spark) paired with its OWN `SplatEdit`. The
+    // SplatEdit configures blend mode (`multiply` = darken) and a
+    // per-volume soft-edge falloff; the SplatEditSdf carries the shape
+    // (box / cylinder), color (= darkness), opacity, and transform
+    // (which the gizmo edits). Giving each volume its own edit is what
+    // lets intensity AND edge softness be tuned per volume, and lets a
+    // volume be SCOPED to a single object: Spark only treats an edit as
+    // "global" (applied to every SplatMesh) when it has no SplatMesh
+    // ancestor — so mounting a volume's edit under one object's
+    // SplatMesh darkens only that object (see mountVolumeEdit).
+    //
+    // We keep each edit's `.sdfs` array as the source of truth. The
+    // SplatEditSdf nodes always live at the SCENE ROOT — never under a
+    // SplatMesh — because Spark encodes each SDF as a decomposed
+    // position/quaternion/scale and would silently drop any shear
+    // inherited from an ancestor's rotation × non-uniform scale (the
+    // shadow would smear while the helper looked fine). "Parenting" a
+    // volume to a splat is therefore logical: we store an offset matrix
+    // and re-derive the SDF's world TRS from the parent every frame
+    // (see setVolumeParent / syncVolumes).
+    //
+    // Visual helper (faint solid + wireframe) is a child of each SDF, so
+    // it inherits the gizmo transform automatically.
+    //
+    // Spark's SDF unit conventions — important for sizing the helper:
+    //   Box       : sdf.scale.xyz are the half-extents (so scale=(1,1,1)
+    //               makes a 2x2x2 cube). Helper geometry uses BoxGeometry(2,2,2).
+    //   Cylinder  : sdf.radius is the radial extent, sdf.scale.y is the
+    //               half-height. We mirror sdf.scale.x→sdf.radius so the
+    //               gizmo's X handle controls radius the way the user
+    //               expects, and sdf.scale.z is kept locked to scale.x.
+    //               Helper geometry uses CylinderGeometry(1, 1, 2, 32, 1).
     // -----------------------------------------------------------------------
-    const MAX_VOLUMES = 16;
-    const volumes = [];          // [{ id, name, type, helper }]
+    const MAX_VOLUMES = 32;
+    const volumes = [];          // [{ id, name, type, sdfNode, edit, intensity, softness, parentId, parentLocal, helperRoot }]
     let nextVolumeId = 1;
     let selectedVolumeId = null;
 
-    // Global per-volume style — applied uniformly to every volume so a
-    // single pair of sliders ("Softness" / "Intensity") controls the
-    // overall look. Per-volume controls would be straightforward to add
-    // later by storing these on the volume record instead.
-    const volumeStyle = {
+    // Default look for a freshly-dropped volume. Each volume then carries
+    // its OWN `intensity` / `softness` on its record (set in addVolume),
+    // so every box / cylinder can be tuned independently from the inline
+    // sliders in the Shadow volumes panel.
+    const DEFAULT_VOLUME_STYLE = {
       intensity: 0.6,  // 0 = no effect, 1 = pure black at the volume's center
-      softness:  0.4,  // 0 = hard edge, 0.5 = smoothed all the way to center
+      softness:  0.4,  // 0 = hard edge, larger = smoother falloff
     };
 
-    // Backing storage for the uniform arrays the shader reads. We mutate
-    // these in place each frame in syncVolumeUniforms() — three.js keeps
-    // re-uploading the array as long as we set `value` to the same buffer.
-    const _volumeMatricesArray = new Float32Array(MAX_VOLUMES * 16);
-    const _volumeParamsArray   = new Float32Array(MAX_VOLUMES * 4);
-    for (let i = 0; i < MAX_VOLUMES; i++) {
-      _volumeMatricesArray.set(
-        [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1],
-        i * 16,
-      );
-    }
-    const _volumeInvMatScratch = new THREE.Matrix4();
+    // Per-volume scoping model.
+    //
+    // Each volume owns its OWN `SplatEdit` (so `softEdge` — the edge
+    // falloff — is per-volume) plus a `SplatEditSdf` shape. Spark decides
+    // WHICH splat meshes an edit touches purely from where the SplatEdit
+    // sits in the scene graph:
+    //   • SplatEdit with NO SplatMesh ancestor → "global" → every mesh.
+    //   • SplatEdit parented under a SplatMesh → only that one mesh.
+    // So to make a volume affect ONLY the object it's attached to, we
+    // mount its edit under that object's SplatMesh (see mountVolumeEdit).
+    // Free-standing volumes (parent = "(scene)") stay global.
+    //
+    // The SDF NODE itself always lives at the scene root regardless of
+    // scoping — Spark reads its world TRS via `edit.sdfs`, and keeping it
+    // at the root avoids shear from a parent's rotation × non-uniform
+    // scale (a TRS decompose would silently drop it and smear the
+    // shadow). Parent-follow is done numerically in syncVolumes(), not
+    // through the scene graph.
 
-    const _volumeNum = dyno.dynoInt(0);
-    const _volumeInvMats = new dyno.DynoUniform({
-      key: "_shadowVolInvMats",
-      type: "mat4",
-      count: MAX_VOLUMES,
-      value: _volumeMatricesArray,
-    });
-    const _volumeParams = new dyno.DynoUniform({
-      key: "_shadowVolParams",
-      type: "vec4",
-      count: MAX_VOLUMES,
-      value: _volumeParamsArray,
-    });
-
-    // Pulls the latest helper transforms into the uniform arrays. Called
-    // every frame from the render loop. Cheap (≤ MAX_VOLUMES * matrix
-    // inverse) and runs on the CPU.
-    function syncVolumeUniforms() {
-      const n = Math.min(volumes.length, MAX_VOLUMES);
-      _volumeNum.value = n;
-      for (let i = 0; i < n; i++) {
-        const v = volumes[i];
-        // updateWorldMatrix(true, false) walks UP the scene graph and
-        // refreshes every ancestor's world matrix before recomputing
-        // ours. This matters when the helper is parented to a SplatMesh:
-        // dragging that splat with the gizmo updates splat.position, but
-        // splat.matrixWorld stays stale until the next render's full
-        // updateMatrixWorld pass — which runs AFTER us. A plain
-        // updateMatrixWorld() reads parent.matrixWorld directly and so
-        // would feed the shader a 1-frame-stale invMatrix, making the
-        // shadow visibly drag behind the parent during a drag.
-        v.helper.updateWorldMatrix(true, false);
-        _volumeInvMatScratch.copy(v.helper.matrixWorld).invert();
-        _volumeMatricesArray.set(_volumeInvMatScratch.elements, i * 16);
-        _volumeParamsArray[i*4 + 0] = v.type === "cylinder" ? 1.0 : 0.0;
-        _volumeParamsArray[i*4 + 1] = volumeStyle.softness;
-        _volumeParamsArray[i*4 + 2] = volumeStyle.intensity;
-        _volumeParamsArray[i*4 + 3] = 0.0;
-      }
+    // Push a volume's current style onto its own SplatEdit + SDF. Spark
+    // diffs these internally on its next update() and only re-uploads the
+    // bytes that actually changed.
+    function applyVolumeStyle(v) {
+      if (!v || !v.sdfNode || !v.edit) return;
+      v.edit.softEdge = v.softness;
+      const k = Math.max(0, 1 - v.intensity);
+      v.sdfNode.color.setRGB(k, k, k);
+      v.sdfNode.opacity = 1;
     }
 
-    // Two SDFs in unit (gizmo-scaled) space; the gizmo's scale becomes the
-    // effective half-extent of the volume. We use `max` (not `min`) so the
-    // shape's outside is positive and inside is negative — standard SDF
-    // sign convention. The helper geometries match these dimensions.
-    const _volumeShaderHelpers = `
-      float _shadowVolBoxSdf(vec3 p) {
-        vec3 d = abs(p) - vec3(0.5);
-        return max(d.x, max(d.y, d.z));
-      }
-      float _shadowVolCylSdf(vec3 p) {
-        return max(length(p.xz) - 0.5, abs(p.y) - 0.5);
-      }
-    `;
-
-    // Builds the per-splat darkness multiplier coming from all active
-    // shadow volumes. Loop is bounded by MAX_VOLUMES (compile-time const)
-    // and short-circuits via the active count uniform, so unused slots
-    // cost a single int compare in the shader.
-    function volumeFactorDyno(centerDyno) {
-      return new dyno.Dyno({
-        inTypes: { center: "vec3", num: "int", invMats: "mat4", params: "vec4" },
-        outTypes: { factor: "float" },
-        inputs: {
-          center: centerDyno,
-          num: _volumeNum,
-          invMats: _volumeInvMats,
-          params: _volumeParams,
-        },
-        globals: () => [_volumeShaderHelpers],
-        statements: ({ inputs, outputs }) => [
-          "float _vfac = 1.0;",
-          `for (int _vi = 0; _vi < ${MAX_VOLUMES}; _vi++) {`,
-          `  if (_vi >= ${inputs.num}) { break; }`,
-          `  vec3 _vlocal = (${inputs.invMats}[_vi] * vec4(${inputs.center}, 1.0)).xyz;`,
-          `  float _vsdf = (${inputs.params}[_vi].x > 0.5) ? _shadowVolCylSdf(_vlocal) : _shadowVolBoxSdf(_vlocal);`,
-          `  float _vsoft = max(${inputs.params}[_vi].y, 0.001);`,
-          `  float _vint  = ${inputs.params}[_vi].z;`,
-          `  float _vt = smoothstep(0.0, _vsoft, -_vsdf);`,
-          `  _vfac *= mix(1.0, 1.0 - _vint, _vt);`,
-          "}",
-          `${outputs.factor} = _vfac;`,
-        ],
-      }).outputs.factor;
+    // Re-mount a volume's SplatEdit so its scope matches its parent:
+    // under the parent object's SplatMesh (darkens only that object) or
+    // at the scene root (global — darkens everything). The SDF node is
+    // left untouched at the scene root. `scene` / `objects` don't exist
+    // yet at this point in the file but this only runs at interaction
+    // time, long after both are defined.
+    function mountVolumeEdit(v) {
+      if (!v || !v.edit) return;
+      v.edit.parent?.remove(v.edit);
+      const parentObj = v.parentId != null
+        ? objects.find((o) => o.id === v.parentId)
+        : null;
+      const host = parentObj?.splatMesh ?? scene;
+      host.add(v.edit);
     }
+
+    // Per-frame upkeep (parent following + cylinder radius mirroring)
+    // lives in syncVolumes(), defined next to setVolumeParent below and
+    // called from the render loop.
 
     // -----------------------------------------------------------------------
     // SHADOW MASK ARCHITECTURE
@@ -1251,27 +1309,23 @@
         { gsplat: dyno.Gsplat },
         ({ gsplat }) => {
           if (!gsplat) throw new Error("shadowDyno: missing gsplat input");
-          // Spark applies the object→world transform BEFORE world
-          // modifiers run, so `center` here is in world space — exactly
-          // what we want for shadow volumes (placed in world space).
-          const { rgb, index, center } = dyno.splitGsplat(gsplat).outputs;
+          const { rgb, index } = dyno.splitGsplat(gsplat).outputs;
 
-          // 1. Brush mask — per-splat multiplier. OOB reads (LOD-merged
-          //    splats whose index is past the original count) come back
-          //    as alpha=0 and fall through to identity instead of black.
+          // Brush mask — per-splat multiplier. OOB reads (LOD-merged
+          // splats whose index is past the original count) come back
+          // as alpha=0 and fall through to identity instead of black.
+          //
+          // Shadow VOLUMES no longer go through this dyno — they're
+          // applied earlier in Spark's pipeline via SplatEdit (see the
+          // SHADOW VOLUMES block above). Both effects still compose
+          // commutatively under multiply, so the final color is
+          // base_rgb · brush_mask · sdf_factor regardless of order.
           const mask4    = readRgbaArray(maskDyno, index);
           const maskA    = dyno.swizzle(mask4, "a");
           const inBounds = dyno.greaterThan(maskA, _half);
           const maskRgb  = dyno.select(inBounds, dyno.vec3(mask4), _identityMaskRgb);
 
-          // 2. Shadow volumes — global geometric darkeners; same factor
-          //    is applied to every loaded mesh so a volume "casts" across
-          //    the whole scene.
-          const volFactor = volumeFactorDyno(center);
-
-          // 3. Stack: rgb * brush * volumes. Both factors are <= 1 so the
-          //    splat can only get darker, never brighter.
-          const newRgb = dyno.mul(dyno.mul(rgb, maskRgb), volFactor);
+          const newRgb = dyno.mul(rgb, maskRgb);
           gsplat = dyno.combineGsplat({ gsplat, rgb: newRgb });
           return { gsplat };
         },
@@ -1435,6 +1489,11 @@
     const spark = new SparkRenderer({ renderer });
     scene.add(spark);
 
+    // Shadow-volume edits are created and mounted per-volume in addVolume
+    // / mountVolumeEdit (global ones land on the scene root, scoped ones
+    // under their parent object's SplatMesh), so there's nothing to mount
+    // here.
+
     const controls = new SparkControls({ canvas: renderer.domElement });
     const camera = new THREE.PerspectiveCamera(
       50, window.innerWidth / window.innerHeight, 0.01, 1000,
@@ -1458,9 +1517,43 @@
     // routinely land hundreds of meters away from the world origin, which
     // would otherwise leave the user staring at an empty scene with only
     // the gizmo visible.
+    // Robust bounds: sample splat centers and take the 1st/99th
+    // percentile per axis instead of the raw min/max. Splat captures
+    // routinely contain sparse far-away "floater" splats (and a damaged
+    // file can contain outright garbage positions); a raw bounding box
+    // around those can be 50x bigger than the actual content, which
+    // would park the camera so far away the scene looks like a speck.
+    function robustBoundsFromSplats(packedSplats) {
+      const n = packedSplats?.numSplats ?? 0;
+      if (!n || !packedSplats.packedArray) return null;
+      const step = Math.max(1, Math.floor(n / 100000));
+      const xs = [], ys = [], zs = [];
+      for (let i = 0; i < n; i += step) {
+        const u = unpackSplat(packedSplats.packedArray, i, packedSplats.splatEncoding);
+        if (!isFinite(u.center.x) || !isFinite(u.center.y) || !isFinite(u.center.z)) continue;
+        xs.push(u.center.x); ys.push(u.center.y); zs.push(u.center.z);
+      }
+      if (xs.length < 16) return null;
+      const pick = (a, p) => {
+        a.sort((q, r) => q - r);
+        return [a[Math.floor(0.01 * a.length)], a[Math.min(a.length - 1, Math.floor(p * a.length))]];
+      };
+      const [x0, x1] = pick(xs, 0.99);
+      const [y0, y1] = pick(ys, 0.99);
+      const [z0, z1] = pick(zs, 0.99);
+      return new THREE.Box3(
+        new THREE.Vector3(x0, y0, z0),
+        new THREE.Vector3(x1, y1, z1),
+      );
+    }
+
     function frameCameraOnMesh(splatMesh) {
       try {
-        const box = splatMesh.getBoundingBox(true);
+        // Prefer percentile bounds from the splat data; fall back to
+        // Spark's bounding box (e.g. LOD-built meshes whose base splat
+        // array is empty).
+        const box = robustBoundsFromSplats(splatMesh.packedSplats)
+          ?? splatMesh.getBoundingBox(true);
         if (!box || !isFinite(box.min.x) || !isFinite(box.max.x)) return;
         const center = box.getCenter(new THREE.Vector3());
         const size   = box.getSize(new THREE.Vector3());
@@ -1692,8 +1785,8 @@
       if (splat && splat.splatMesh) {
         transformControls.attach(splat.splatMesh);
         transformHelper.visible = true;
-      } else if (vol && vol.helper) {
-        transformControls.attach(vol.helper);
+      } else if (vol && vol.sdfNode) {
+        transformControls.attach(vol.sdfNode);
         transformHelper.visible = true;
       } else {
         transformControls.detach();
@@ -1746,9 +1839,11 @@
     function renderObjectsPanel() {
       if (!hasObjects()) {
         objectsPanelEl.classList.add("hidden");
+        gui.hide();
         return;
       }
       objectsPanelEl.classList.remove("hidden");
+      gui.show();
       objectsListEl.innerHTML = "";
       for (const obj of objects) {
         const li = document.createElement("li");
@@ -1787,16 +1882,55 @@
     // -----------------------------------------------------------------------
     // Volumes panel — list of placed shadow primitives + add buttons.
     //
-    // A volume is a Three.js Group containing two children:
+    // Each volume is a `SplatEditSdf` Object3D (Spark's native SDF edit
+    // node) with a visual helper Group attached as a child. The helper
+    // contains:
     //   • a faint solid shaded mesh (visual hint, no depth-write)
     //   • a wireframe outline (so you can see edges through splats)
-    // The group itself is what the gizmo manipulates; its inverse world
-    // matrix is what feeds the shader (see syncVolumeUniforms).
+    // The SDF node itself is what the gizmo manipulates; Spark reads
+    // every SDF's world transform via its volume's own `edit` (see the
+    // SHADOW VOLUMES block above) and darkens splats inside.
     // -----------------------------------------------------------------------
     const volumesPanelEl = document.getElementById("volumes-panel");
     const volumesListEl  = document.getElementById("volumes-list");
     const addBoxBtn      = document.getElementById("volumes-add-box");
     const addCylBtn      = document.getElementById("volumes-add-cyl");
+
+    // Single style panel for the SELECTED volume — one pair of sliders
+    // shared across all volumes, retargeted whenever the selection
+    // changes (see renderVolumeStyleControls). Lets each box / cylinder
+    // keep its own intensity + softness without a slider on every row.
+    const volumeStyleEl  = document.getElementById("volume-style");
+    const volStyleHeadEl = document.getElementById("vol-style-head");
+    const volIntensityEl = document.getElementById("vol-intensity");
+    const volSoftnessEl  = document.getElementById("vol-softness");
+
+    volIntensityEl.addEventListener("input", (e) => {
+      const v = getSelectedVolume();
+      if (!v) return;
+      v.intensity = parseFloat(e.target.value);
+      applyVolumeStyle(v);
+    });
+    volSoftnessEl.addEventListener("input", (e) => {
+      const v = getSelectedVolume();
+      if (!v) return;
+      v.softness = parseFloat(e.target.value);
+      applyVolumeStyle(v);
+    });
+
+    // Reflect the selected volume's values onto the shared sliders (or
+    // hide the panel when nothing is selected).
+    function renderVolumeStyleControls() {
+      const v = getSelectedVolume();
+      if (!v) {
+        volumeStyleEl.classList.add("hidden");
+        return;
+      }
+      volumeStyleEl.classList.remove("hidden");
+      volStyleHeadEl.textContent = v.name;
+      volIntensityEl.value = String(v.intensity);
+      volSoftnessEl.value  = String(v.softness);
+    }
 
     // Highlight color for volume helpers — distinguishable from the splat
     // bounds (which are not drawn) and from the brush gizmo (cyan-ish).
@@ -1804,16 +1938,22 @@
     const VOLUME_COLOR_SELECTED = 0xff8800;
 
     // Build the visual representation of a volume. The geometry sizes
-    // here are the SDF "unit" sizes — half-extent 0.5 cube and a
-    // cylinder of radius 0.5 / height 1, axis = Y. The user-visible
-    // size comes from helper.scale, which is what the gizmo edits.
+    // The geometry sizes here match Spark's SDF unit conventions:
+    //   • Box      : sdf.scale.xyz are the half-extents, so a unit-scale
+    //                box occupies [-1,+1]^3 → BoxGeometry(2,2,2).
+    //   • Cylinder : sdf.radius is the radial extent and sdf.scale.y is
+    //                the half-height, so a unit-scale cylinder is radius
+    //                1 / height 2 along Y → CylinderGeometry(1, 1, 2).
+    // The helper Group is added as a CHILD of the SplatEditSdf (which is
+    // itself a THREE.Object3D), so it inherits the SDF's transform — and
+    // therefore the gizmo's transform — automatically.
     function makeVolumeHelper(type) {
       const group = new THREE.Group();
-      group.name = `shadow-volume-${type}`;
+      group.name = `shadow-volume-helper-${type}`;
 
       const geo = (type === "cylinder")
-        ? new THREE.CylinderGeometry(0.5, 0.5, 1, 32, 1)
-        : new THREE.BoxGeometry(1, 1, 1);
+        ? new THREE.CylinderGeometry(1, 1, 2, 32, 1)
+        : new THREE.BoxGeometry(2, 2, 2);
 
       // Faint translucent solid — gives the volume "presence" without
       // hiding splats behind it. depthWrite off so it never occludes
@@ -1848,13 +1988,16 @@
     }
 
     // Update helper colors so the selected volume "lights up". Cheap —
-    // just a material color swap, no geometry rebuild.
+    // just a material color swap, no geometry rebuild. Walks ONLY the
+    // visual helper subtree (not the SplatEditSdf root) so we don't
+    // touch Spark's color uniform on the SDF itself.
     function styleVolumeHelper(v) {
+      if (!v.helperRoot) return;
       const isSel = v.id === selectedVolumeId;
       const color = isSel ? VOLUME_COLOR_SELECTED : VOLUME_COLOR_BASE;
       const wireOpacity  = isSel ? 1.0  : 0.7;
       const solidOpacity = isSel ? 0.10 : 0.05;
-      v.helper.traverse((node) => {
+      v.helperRoot.traverse((node) => {
         if (!node.material) return;
         node.material.color.setHex(color);
         if (node.name === "volume-wire")  node.material.opacity = wireOpacity;
@@ -1866,60 +2009,176 @@
     // Drop a new volume in front of the camera at a comfortable size.
     // Auto-selects so the gizmo immediately appears on the new volume,
     // ready for the user to drag it into place.
+    //
+    // Each volume is backed by a `SplatEditSdf` (a THREE.Object3D Spark
+    // ships) registered with the volume's own `edit`. We attach the
+    // visual helper (faint solid + wireframe) as a CHILD of the SDF, so:
+    //   • The gizmo edits sdfNode.position/quaternion/scale directly.
+    //   • The helper inherits that transform automatically — no manual
+    //     matrix copy needed.
+    //   • Spark finds the SDF via `edit.sdfs` regardless of where in the
+    //     scene graph the SDF sits, so the darkening "just works"; the
+    //     edit's OWN position in the graph decides which meshes it hits.
     function addVolume(type) {
       if (volumes.length >= MAX_VOLUMES) {
         showOverlay(`Max ${MAX_VOLUMES} shadow volumes`);
         return;
       }
-      const helper = makeVolumeHelper(type);
+
+      const helperRoot = makeVolumeHelper(type);
+
+      const sdfNode = new SplatEditSdf({
+        type,
+        // color is the multiply factor (1 = no effect, 0 = pure black).
+        // applyVolumeStyle(v) writes the actual value below — this is
+        // just a sane default in case applyVolumeStyle is skipped.
+        color: new THREE.Color(1, 1, 1),
+        opacity: 1,
+        radius: type === "cylinder" ? 1 : 0,
+      });
+      sdfNode.name = `shadow-volume-${type}`;
+      sdfNode.add(helperRoot);
 
       // Place ~3 units in front of the camera so it lands in view.
       const fwd = new THREE.Vector3();
       camera.getWorldDirection(fwd);
-      helper.position.copy(camera.position).addScaledVector(fwd, 3);
-      helper.scale.setScalar(1.0);
+      sdfNode.position.copy(camera.position).addScaledVector(fwd, 3);
+      sdfNode.scale.setScalar(1.0);
+      scene.add(sdfNode);
 
-      scene.add(helper);
+      // Each volume gets its OWN edit so intensity + edge softness are
+      // independent per volume, and so it can be scoped to a single
+      // object by mounting the edit under that object's SplatMesh
+      // (mountVolumeEdit). Spark reads the shape via `edit.sdfs`.
+      const edit = new SplatEdit({
+        rgbaBlendMode: "multiply",
+        softEdge: DEFAULT_VOLUME_STYLE.softness,
+        sdfSmooth: 0,
+      });
+      edit.sdfs = [sdfNode];   // explicit array — Spark uses this instead of traversing
 
       const id = nextVolumeId++;
+      edit.name = `shadow-volume-edit-${id}`;
       const idx = volumes.length;
       const name = type === "cylinder"
         ? `Cylinder ${idx + 1}`
         : `Box ${idx + 1}`;
-      // parentId === null means the volume lives directly under the
-      // scene root. Setting it to a splat object's id reparents the
-      // helper under that SplatMesh, so the volume tags along whenever
-      // the parent moves / rotates / scales (the shader auto-tracks it
-      // because it uses the helper's matrixWorld every frame).
-      volumes.push({ id, name, type, helper, parentId: null });
-      styleVolumeHelper(volumes[volumes.length - 1]);
+      // parentId === null means the volume is free-standing. Setting it
+      // to a splat object's id makes the volume FOLLOW that splat's
+      // transform (see setVolumeParent / syncVolumes — the SDF node
+      // itself always stays at the scene root so Spark's TRS encoding
+      // of the SDF never picks up shear from an ancestor transform).
+      //
+      // `sdfNode` is BOTH the Spark SDF that darkens splats AND the
+      // gizmo target (it's a THREE.Object3D). `helperRoot` is the
+      // visual-only subtree used for selection styling.
+      const v = {
+        id, name, type,
+        sdfNode,
+        edit,
+        helperRoot,
+        intensity: DEFAULT_VOLUME_STYLE.intensity,
+        softness:  DEFAULT_VOLUME_STYLE.softness,
+        parentId: null,
+        parentLocal: null,   // Matrix4 offset relative to parent (set by setVolumeParent)
+      };
+      volumes.push(v);
+      mountVolumeEdit(v);    // free-standing → global until parented to an object
+      applyVolumeStyle(v);
+      styleVolumeHelper(v);
       selectVolume(id);
       showOverlay(`Added shadow ${type}`);
     }
 
-    // Re-parent a volume's helper without visually shifting it. We use
-    // THREE.Object3D.attach (rather than .add) because attach decomposes
-    // the new local transform from the helper's CURRENT world matrix and
-    // the new parent's inverse world matrix — i.e. the helper stays put
-    // in world space while gaining a new parent. From then on, parent
-    // transforms compose into the helper's matrixWorld through the
-    // standard scene graph and the shader sees them automatically.
+    // "Parent" a volume to a splat object — LOGICALLY, not in the scene
+    // graph. The SDF node always stays at the scene root; we record the
+    // volume's transform relative to the parent (`parentLocal`) and
+    // re-derive the SDF's world TRS from the parent every frame in
+    // syncVolumes().
+    //
+    // Why not just scene-graph attach()? Spark encodes each SplatEditSdf
+    // as a pure position/quaternion/scale: it inverts the SDF's
+    // matrixWorld and runs Matrix4.decompose on it. If the SDF inherits
+    // a parent whose rotation and (non-uniform) scale interact, the
+    // world matrix contains SHEAR, which a TRS decompose silently drops
+    // — the shadow then evaluates in a skewed space and smears across
+    // the scene while the wireframe helper (rendered through the full
+    // matrix chain) still looks correct. Keeping the SDF at the root
+    // with an explicitly-composed TRS means the shadow is always a true
+    // box/cylinder that exactly matches its helper, and it still tracks
+    // the parent's movement/rotation/scale.
+    const _vpInv     = new THREE.Matrix4();
+    const _vpDesired = new THREE.Matrix4();
     function setVolumeParent(volumeId, parentId) {
       const v = volumes.find((x) => x.id === volumeId);
-      if (!v || !v.helper) return;
+      if (!v || !v.sdfNode) return;
       const parentObj = parentId != null
         ? objects.find((o) => o.id === parentId)
         : null;
-      const targetParent = parentObj?.splatMesh ?? scene;
-      // No-op if we're already under that parent — avoids a redundant
-      // matrix decomposition (which can introduce tiny float drift).
-      if (v.helper.parent === targetParent && v.parentId === (parentObj?.id ?? null)) return;
-      // Make sure both ends of the chain have fresh world matrices so
-      // attach() reads the right "before" world transform.
-      v.helper.updateMatrixWorld(true);
-      targetParent.updateMatrixWorld(true);
-      targetParent.attach(v.helper);
-      v.parentId = parentObj ? parentObj.id : null;
+      if (v.parentId === (parentObj?.id ?? null)) return;
+      if (parentObj?.splatMesh) {
+        // Capture the volume's CURRENT pose relative to the new parent,
+        // so parenting never visibly moves the volume.
+        parentObj.splatMesh.updateWorldMatrix(true, false);
+        v.sdfNode.updateMatrixWorld(true);
+        v.parentLocal = new THREE.Matrix4()
+          .copy(parentObj.splatMesh.matrixWorld)
+          .invert()
+          .multiply(v.sdfNode.matrixWorld);
+        v.parentId = parentObj.id;
+      } else {
+        // Un-parent: the SDF already holds its own world TRS (it lives
+        // at the scene root), so just stop following.
+        v.parentId = null;
+        v.parentLocal = null;
+      }
+      // Re-scope the darkening: under the new parent's SplatMesh (affects
+      // only that object) or back at the scene root (global).
+      mountVolumeEdit(v);
+    }
+
+    // Per-frame volume sync, called from the render loop:
+    //   1. Parented volumes follow their parent: world = parentWorld ·
+    //      parentLocal, decomposed onto the root-level SDF node. While
+    //      the gizmo is dragging the volume itself we instead re-capture
+    //      parentLocal so the user's drag "writes through" to the offset.
+    //   2. Cylinders mirror scale.x → radius (Spark cylinders use a
+    //      scalar radius rather than per-axis x/z scale) and lock z to x.
+    function syncVolumes() {
+      for (const v of volumes) {
+        if (!v.sdfNode) continue;
+
+        if (v.parentId != null && v.parentLocal) {
+          const parentObj = objects.find((o) => o.id === v.parentId);
+          const mesh = parentObj?.splatMesh;
+          if (mesh) {
+            // Refresh ancestors first — during a gizmo drag of the
+            // parent, its matrixWorld is stale until the next render's
+            // updateMatrixWorld pass (which runs AFTER us). Without
+            // this the shadow visibly lags one frame behind.
+            mesh.updateWorldMatrix(true, false);
+            if (gizmoDragging && transformControls.object === v.sdfNode) {
+              // User is dragging the volume — update the stored offset.
+              v.sdfNode.updateMatrixWorld(true);
+              v.parentLocal
+                .copy(_vpInv.copy(mesh.matrixWorld).invert())
+                .multiply(v.sdfNode.matrixWorld);
+            } else {
+              _vpDesired.multiplyMatrices(mesh.matrixWorld, v.parentLocal);
+              _vpDesired.decompose(
+                v.sdfNode.position, v.sdfNode.quaternion, v.sdfNode.scale,
+              );
+            }
+          }
+        }
+
+        if (v.type === "cylinder") {
+          const s = v.sdfNode.scale;
+          if (s.z !== s.x) s.z = s.x;
+          const r = Math.max(0.0001, s.x);
+          if (v.sdfNode.radius !== r) v.sdfNode.radius = r;
+        }
+      }
     }
 
     function removeVolume(id) {
@@ -1928,18 +2187,18 @@
       const v = volumes[idx];
       // Detach gizmo BEFORE removing from scene — TransformControls keeps
       // a reference and will misbehave if its target disappears mid-frame.
-      if (transformControls.object === v.helper) {
+      if (transformControls.object === v.sdfNode) {
         transformControls.detach();
         transformHelper.visible = false;
       }
-      scene.remove(v.helper);
-      v.helper.traverse((node) => {
+      v.edit?.parent?.remove(v.edit);
+      v.sdfNode.parent?.remove(v.sdfNode);
+      v.sdfNode.traverse((node) => {
         if (node.geometry) node.geometry.dispose();
         if (node.material) node.material.dispose();
       });
       volumes.splice(idx, 1);
       if (selectedVolumeId === id) selectedVolumeId = null;
-      syncVolumeUniforms();
       renderVolumesPanel();
       // Trigger a gizmo refresh in case the splat selection should now
       // claim the gizmo back.
@@ -2001,7 +2260,7 @@
 
           const select = document.createElement("select");
           select.className = "parent-select";
-          select.title = "Parent this volume to a splat object — it will follow the splat's transform";
+          select.title = "Attach this volume to a splat object — it then darkens ONLY that object and follows its transform. (scene) = affects every object.";
 
           const noneOpt = document.createElement("option");
           noneOpt.value = "";
@@ -2041,6 +2300,10 @@
 
         styleVolumeHelper(v);
       }
+
+      // Retarget the shared Intensity / Softness sliders to whatever
+      // volume is currently selected (or hide them when none is).
+      renderVolumeStyleControls();
     }
 
     addBoxBtn.addEventListener("click", () => addVolume("box"));
@@ -2344,13 +2607,14 @@
         if (owner) bestSplat = { dist: splatHits[0].distance, obj: owner };
       }
 
-      // Volume hits — raycast against the helper Group; the solid mesh
-      // catches the rays, the wireframe is ignored (LineSegments don't
-      // have a meaningful "fill" hit).
+      // Volume hits — raycast against the SDF node (which carries the
+      // visual helper as a child). The solid mesh inside catches the
+      // rays; the wireframe LineSegments don't have a meaningful "fill"
+      // hit and are ignored by raycaster.intersectObject.
       let bestVol = null;
       for (const v of volumes) {
-        if (!v.helper) continue;
-        const volHits = raycaster.intersectObject(v.helper, true);
+        if (!v.sdfNode) continue;
+        const volHits = raycaster.intersectObject(v.sdfNode, true);
         if (volHits.length === 0) continue;
         const closest = volHits[0].distance;
         if (!bestVol || closest < bestVol.dist) bestVol = { dist: closest, obj: v };
@@ -2391,6 +2655,9 @@
     // GUI
     // -----------------------------------------------------------------------
     const gui = new GUI({ title: "Shadow Brush" });
+    // Keep the GUI hidden until the first splat is loaded — the empty drop
+    // zone shouldn't be cluttered by controls that have nothing to act on.
+    gui.hide();
 
     const brushFolder = gui.addFolder("Brush");
     brushFolder
@@ -2451,18 +2718,13 @@
       .name("LOD (fast 40M+ splats)")
       .onChange(() => {
         refreshBrushAvailability();
-        // Turning LOD OFF is a one-line flip per mesh (no reload).
-        // Turning LOD ON requires the LOD pyramid to actually exist on
-        // the loaded meshes — for any mesh that was loaded with LOD off,
-        // we have to rebuild it. Cheaper case (was loaded with LOD on)
-        // also goes through reload, which is acceptable since the user
-        // explicitly opted in.
-        if (LOD.enabled) {
-          reloadAllObjects("LOD on");
-        } else {
-          applyLodForAllMeshes();
-          showOverlay("LOD off");
-        }
+        // BOTH directions require a full reload. LOD ON: the pyramid
+        // must be built into each mesh. LOD OFF: meshes constructed
+        // with the pyramid keep their base splat array EMPTY (all data
+        // lives in lodSplats), so merely flipping enableLod = false
+        // would render nothing — they have to be reconstructed without
+        // the pyramid to paint/save correctly.
+        reloadAllObjects(LOD.enabled ? "LOD on" : "LOD off");
       });
     sceneFolder
       .add(LOD, "quality", 1.1, 2.0, 0.05)
@@ -2492,16 +2754,11 @@
     shadowFolder.open();
 
     // ---- Shadow volumes folder ------------------------------------------
-    // Global style controls for the box / cylinder shadow primitives.
-    // The `addVolume` calls double as a way to add volumes from the GUI
-    // for users who prefer the controls over the on-screen panel.
+    // Just the add / remove buttons live here now — per-volume Intensity
+    // and Edge softness are inline on each row of the on-screen Shadow
+    // volumes panel, so every box / cylinder is tuned (and scoped to its
+    // parent object) independently.
     const volumesFolder = gui.addFolder("Shadow volumes");
-    volumesFolder
-      .add(volumeStyle, "intensity", 0.0, 1.0, 0.01)
-      .name("Intensity (center)");
-    volumesFolder
-      .add(volumeStyle, "softness", 0.05, 0.5, 0.01)
-      .name("Edge softness");
     const volumeActions = {
       addBox:      () => addVolume("box"),
       addCylinder: () => addVolume("cylinder"),
@@ -2566,6 +2823,21 @@
           return;
         }
 
+        // LOD-built meshes keep their base splat array EMPTY (everything
+        // lives in the LOD pyramid, in a different order), so there is
+        // no aligned original-order data to export. Saving one would
+        // either silently drop the object or write garbage geometry.
+        // Refuse and tell the user the one-step fix.
+        const lodBuilt = meshObjects.filter((o) => isLodBuiltMesh(o.splatMesh));
+        if (lodBuilt.length > 0) {
+          alert(
+            `Can't save while LOD is active on: ${lodBuilt.map((o) => o.name).join(", ")}.\n\n` +
+            `Turn OFF the "LOD" checkbox in the Scene panel (objects will reload), ` +
+            `then save again.`,
+          );
+          return;
+        }
+
         try {
           showOverlay(
             `Saving scene · ${meshObjects.length} object${meshObjects.length > 1 ? "s" : ""}…`,
@@ -2577,27 +2849,64 @@
           //    The reader simply taps the live generator output, so the
           //    saved colors / shadows are exactly what the user sees in
           //    the viewport at save time.
+          //
+          //    CRITICAL: LOD must be OFF on every mesh while we bake.
+          //    With LOD active, Spark swaps the generator over to the
+          //    LOD pyramid and remaps indices through a view-dependent
+          //    indirection texture — so the rgba the generator outputs
+          //    at index i belongs to a DIFFERENT splat than
+          //    packedSplats[i]. The geometry pass below reads the raw
+          //    packedSplats by index, so the export would pair every
+          //    splat with some other splat's color/alpha: shuffled
+          //    colors, wrongly-culled splats, the scene "shattered into
+          //    pieces" in other viewers. Forcing enableLod = false and
+          //    rendering one frame makes Spark rebuild each generator
+          //    against the ORIGINAL splat array with identity index
+          //    mapping — perfectly aligned with the geometry pass.
           const baked = [];
-          for (const obj of meshObjects) {
-            const rgba = new RgbaArray();
-            rgba.render({
-              renderer,
-              count: obj.splatMesh.packedSplats.numSplats,
-              reader: dyno.dynoBlock({ index: "int" }, { rgba8: "vec4" }, ({ index }) => {
-                const { gsplat } = obj.splatMesh.generator.apply({ index });
-                const { rgba: rgba8 } = dyno.splitGsplat(gsplat).outputs;
-                return { rgba8 };
-              }),
-            });
-            const rgbaBytes = await rgba.read();
-            baked.push({ obj, rgbaBytes });
+          const lodStates = meshObjects.map((o) => o.splatMesh.enableLod);
+          try {
+            for (const obj of meshObjects) obj.splatMesh.enableLod = false;
+            // One synchronous render so Spark's per-mesh update() sees
+            // the flag flip, swaps context.splats back to packedSplats,
+            // and rebuilds the generators before we tap them.
+            renderer.render(scene, camera);
+
+            for (const obj of meshObjects) {
+              const rgba = new RgbaArray();
+              rgba.render({
+                renderer,
+                count: obj.splatMesh.packedSplats.numSplats,
+                reader: dyno.dynoBlock({ index: "int" }, { rgba8: "vec4" }, ({ index }) => {
+                  const { gsplat } = obj.splatMesh.generator.apply({ index });
+                  const { rgba: rgba8 } = dyno.splitGsplat(gsplat).outputs;
+                  return { rgba8 };
+                }),
+              });
+              const rgbaBytes = await rgba.read();
+              baked.push({ obj, rgbaBytes });
+            }
+          } finally {
+            // Restore each mesh's LOD flag (the selection-aware policy
+            // will keep refining it from here on out).
+            meshObjects.forEach((o, i) => { o.splatMesh.enableLod = lodStates[i]; });
           }
 
-          // 2. Count live splats (alpha > 0) across all objects.
+          // 2. Count live splats (alpha > 0, finite geometry) across all
+          //    objects. The finite check mirrors the one in the write
+          //    loop below so the writer's numSplats matches writeIdx
+          //    exactly (no zero-filled tail records in the file).
           let totalLive = 0;
-          for (const { rgbaBytes } of baked) {
-            for (let i = 0; i < rgbaBytes.length; i += 4) {
-              if (rgbaBytes[i + 3] > 0) totalLive++;
+          for (const { obj, rgbaBytes } of baked) {
+            const ps = obj.splatMesh.packedSplats;
+            for (let i = 0; i < ps.numSplats; i++) {
+              if (rgbaBytes[i * 4 + 3] === 0) continue;
+              const u = unpackSplat(ps.packedArray, i, ps.splatEncoding);
+              if (!isFinite(u.center.x) || !isFinite(u.center.y) || !isFinite(u.center.z)
+                  || !isFinite(u.scales.x) || !isFinite(u.scales.y) || !isFinite(u.scales.z)) {
+                continue;
+              }
+              totalLive++;
             }
           }
           if (totalLive === 0) {
@@ -2648,6 +2957,14 @@
               if (opacity === 0) continue;
 
               const u = unpackSplat(ogSplats.packedArray, i, ogSplats.splatEncoding);
+
+              // Insurance: never let a non-finite record into the file.
+              // A single NaN/Inf splat quantizes into garbage geometry
+              // that can blow up the scene bounds in other viewers.
+              if (!isFinite(u.center.x) || !isFinite(u.center.y) || !isFinite(u.center.z)
+                  || !isFinite(u.scales.x) || !isFinite(u.scales.y) || !isFinite(u.scales.z)) {
+                continue;
+              }
 
               // Apply the parent's world transform to the splat
               // geometry: position by full matrixWorld, orientation by
@@ -2743,15 +3060,22 @@
       showOverlay(labels[mode]);
     }
     function refreshBrushAvailability() {
-      const noSelection = !getSelected();
+      const sel = getSelected();
+      const noSelection = !sel;
+      // LOD-built meshes have no original-order splat array, so the
+      // per-splat shadow mask can't address them — painting is off
+      // until the user turns LOD off (which reloads the meshes).
+      const lodLocked = !!sel?.splatMesh && isLodBuiltMesh(sel.splatMesh);
       modeButtons.forEach((btn) => {
         const m = btn.dataset.mode;
         const isPaint = m === "shadow" || m === "undo";
-        const disabled = isPaint && noSelection;
+        const disabled = isPaint && (noSelection || lodLocked);
         btn.toggleAttribute("disabled", disabled);
         btn.title = !isPaint || !disabled
           ? ""
-          : "Select an object to paint on";
+          : (lodLocked
+            ? "Turn LOD off (Scene panel) to paint this object"
+            : "Select an object to paint on");
       });
       // If we're currently in a paint mode but the selection has been
       // cleared, fall back to view.
@@ -2830,10 +3154,9 @@
     // -----------------------------------------------------------------------
     renderer.setAnimationLoop(() => {
       controls.update(camera);
-      // Pull every volume's helper transform into the shader uniforms.
-      // Doing this every frame (cheap — 16 mat4 inverts max) means the
-      // gizmo dragging just works: the volume re-darkens splats live.
-      syncVolumeUniforms();
+      // Parented volumes follow their parent's transform; cylinders
+      // mirror gizmo X scale into Spark's scalar radius. Cheap, CPU-side.
+      syncVolumes();
       renderer.render(scene, camera);
     });
   </script>
