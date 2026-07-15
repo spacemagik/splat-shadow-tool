@@ -1,5 +1,7 @@
 # Shadow
 
+**Live demo:** <https://shadow-splat-tool.netlify.app>
+
 A tiny [three.js](https://threejs.org/) + [Spark 2.1](https://sparkjs.dev/) web app
 with a single brush tool that casts **shadows** on a 3D Gaussian Splat scene by
 darkening splats inside the brush volume — preserving their hue so the shadow
@@ -73,7 +75,7 @@ rotate, or scale the splat.
 For shadows that don't conform to a brush stroke — say, a soft cast
 shadow under a piece of furniture, or a column of darkness inside a
 room — drop **shadow volumes** into the scene from the **Shadow
-volumes** panel at the bottom right:
+volumes** panel at the bottom left:
 
 - **+ Box** adds a cube-shaped shadow region.
 - **+ Cylinder** adds a cylindrical shadow region (axis = Y).
@@ -105,7 +107,8 @@ brush gets both effects). When you **Save shadowed SPZ**, each volume's
 contribution is baked into whichever objects it affects, so the
 exported file already has the shadow burned into the splat colors.
 
-The shader supports up to `MAX_VOLUMES` (32) at once.
+Volumes are implemented with Spark's native SDF splat edits
+(`SplatEdit` + `SplatEditSdf`), up to `MAX_VOLUMES` (32) at once.
 
 ### Parenting volumes to objects
 
@@ -120,16 +123,23 @@ root with `(scene)`). Parenting does two things:
    with the gizmo carries the volume along with it, so the shadow stays
    glued to the object.
 
-Parenting is a true scene-graph relationship (`Object3D.attach`),
-which means:
+Parenting is **logical**, not a scene-graph `attach`: the volume's SDF
+node stays at the scene root, and each frame its transform is
+recomposed from the parent's world matrix and a stored relative offset.
+(A true scene-graph parent would introduce shear when the parent is
+rotated and non-uniformly scaled, which distorts the shadow shape —
+keeping the SDF as a pure translate/rotate/scale avoids that.) In
+practice this means:
 
 - The volume's world position is preserved at the moment you change
   parents — switching parents doesn't visually shift the shadow.
-- Scaling the parent splat uniformly scales the volume's effective
-  reach in world space (the shadow grows with the object).
+- Moving / rotating / scaling the parent splat carries the volume
+  along with it, so the shadow stays glued to the object.
 - Removing a parented splat orphans its volumes back to the scene
   root, again preserving their current world transform — the shadows
   stay where they were.
+- Toggling LOD (which reloads every object) preserves parent links:
+  volumes re-attach to the reloaded objects automatically.
 
 ## Controls
 
@@ -173,20 +183,22 @@ without it.
 
 For very large scenes (20M+ splats), tick the LOD box: distant / small
 splats get merged into coarser representatives at runtime so only splats
-near the camera render at full resolution. Toggling LOD reloads every
-loaded object so each one picks up an LOD pyramid (or drops it).
+near the camera render at full resolution. Toggling LOD (either direction)
+reloads every loaded object so each one is rebuilt with (or without) an
+LOD pyramid — your gizmo transforms, selection, and volume parent links
+are preserved across the reload, but painted shadow masks are reset.
 
-LOD internally reorders splats — the rendered splat index points into a
-merged array, not the original — and our per-splat shadow mask is keyed by
-the original index. Painting under LOD would land on the wrong splats. To
-square that with the brush, the app uses a **selection-aware LOD policy**:
+LOD internally reorders splats — meshes loaded with LOD keep their base
+splat array empty (all data lives in the merged pyramid) — so the
+per-splat shadow mask and the SPZ exporter, which are both keyed by the
+original splat order, can't address them. While LOD is on:
 
-- The **currently selected object runs without LOD** so the brush hits the
-  splats you click on.
-- Every other (unselected) object keeps its LOD pyramid so the rest of the
-  scene around it stays cheap.
+- **Painting is disabled** (the brush buttons grey out and hotkeys `1` /
+  `2` are blocked, with a tooltip explaining why).
+- **Save shadowed SPZ is blocked** with the same guidance.
 
-Switching selection is a single uniform flip — no reload, no rebuild.
+The intended flow: fly around and place things with LOD on for speed,
+then untick LOD to paint shadows and export.
 
 Tune **LOD detail** between `1.1` (sharp / more splats kept) and `2.0`
 (aggressive merging / fastest) from the same Scene folder.
@@ -218,8 +230,12 @@ takes on a green/blue tint after enough strokes). Because the mask values
 stay equal across channels (when `coolTint = 0`), every channel quantizes in
 lockstep and the only visible effect is value reduction.
 
-The selection-aware LOD policy (above) is what guarantees the mask indices
-line up with the renderer: with LOD off on the selected mesh, Spark uses
-`packedSplats` directly so `gsplat.index === packed splat index === mask
-index`. The bake updates the same mask entries the renderer reads, so what
-you see is what you painted.
+The LOD paint lock (above) is what guarantees the mask indices line up
+with the renderer: with LOD off, Spark uses `packedSplats` directly so
+`gsplat.index === packed splat index === mask index`. The bake updates
+the same mask entries the renderer reads, so what you see is what you
+painted.
+
+## License
+
+[MIT](LICENSE)

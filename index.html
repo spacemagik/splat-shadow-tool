@@ -1090,6 +1090,9 @@
     const objects = [];
     let selectedObjectId = null;
     let nextObjectId = 1;
+    // Set during reloadAllObjects so re-adding the first object doesn't
+    // re-frame the camera (the scene comes back at the same world poses).
+    let suppressCameraFraming = false;
 
     function getSelected() {
       return objects.find((o) => o.id === selectedObjectId) ?? null;
@@ -1692,8 +1695,10 @@
         // dropping a fresh file on a camera at (0,0,0) can easily put the
         // entire splat off-screen, leaving only the gizmo visible. Frame
         // the camera on the splat ONLY for the first object so subsequent
-        // loads don't yank the camera around the user.
-        if (objects.length === 1) {
+        // loads don't yank the camera around the user. (Skipped entirely
+        // during LOD reloads — the scene returns to the same world poses,
+        // so the user's camera should stay put.)
+        if (objects.length === 1 && !suppressCameraFraming) {
           frameCameraOnMesh(splatMesh);
         }
 
@@ -1732,7 +1737,15 @@
       // remove it from the scene — otherwise TransformControls keeps a
       // dangling reference.
       if (transformControls.object === obj.splatMesh) transformControls.detach();
-      if (obj.splatMesh) scene.remove(obj.splatMesh);
+      if (obj.splatMesh) {
+        scene.remove(obj.splatMesh);
+        // Free GPU resources: the frozen base-color override and the
+        // mesh's own packed splat textures. Without this, every
+        // remove/reload (LOD toggles reload ALL objects) leaks the
+        // full splat data on the GPU.
+        obj.splatMesh.splatRgba?.dispose?.();
+        obj.splatMesh.dispose?.();
+      }
       if (obj.shadowMask) obj.shadowMask.dispose();
       objects.splice(idx, 1);
       if (!hasObjects()) {
@@ -2700,12 +2713,53 @@
       if (!hasObjects()) return;
       showOverlay(toastLabel);
       const previouslySelected = selectedObjectId;
-      const snapshot = objects.map((o) => ({ id: o.id, file: o.file }));
+      // Snapshot each object's gizmo transform too — reloaded meshes come
+      // back at their file-native pose, and volume re-parenting below only
+      // works if the parents are restored to their exact world transforms.
+      const snapshot = objects.map((o) => ({
+        id: o.id,
+        file: o.file,
+        position: o.splatMesh?.position.clone() ?? null,
+        quaternion: o.splatMesh?.quaternion.clone() ?? null,
+        scale: o.splatMesh?.scale.clone() ?? null,
+      }));
+      // Volume parent links are by object id, and reloading assigns NEW
+      // ids — remember each parent by its snapshot index so we can
+      // re-link after the reload instead of silently orphaning volumes.
+      const volumeParents = volumes
+        .filter((v) => v.parentId != null)
+        .map((v) => ({
+          volumeId: v.id,
+          parentIdx: snapshot.findIndex((s) => s.id === v.parentId),
+        }));
       // Remove existing
       for (const o of [...objects]) removeObject(o.id);
       // Re-add in original order
-      for (const s of snapshot) {
-        if (s.file) await addObjectFromFile(s.file);
+      suppressCameraFraming = true;
+      try {
+        for (const s of snapshot) {
+          if (s.file) await addObjectFromFile(s.file);
+        }
+      } finally {
+        suppressCameraFraming = false;
+      }
+      // Restore transforms (reload order matches snapshot order).
+      for (let i = 0; i < snapshot.length && i < objects.length; i++) {
+        const s = snapshot[i];
+        const mesh = objects[i].splatMesh;
+        if (!mesh || !s.position) continue;
+        mesh.position.copy(s.position);
+        mesh.quaternion.copy(s.quaternion);
+        mesh.scale.copy(s.scale);
+        mesh.updateMatrixWorld(true);
+      }
+      // Re-link volumes to their reloaded parents (same index, new id).
+      // The volumes kept their world pose while orphaned, and the parents
+      // are back at their original transforms, so re-parenting recaptures
+      // the identical relative offset.
+      for (const vp of volumeParents) {
+        const parent = vp.parentIdx >= 0 ? objects[vp.parentIdx] : null;
+        if (parent) setVolumeParent(vp.volumeId, parent.id);
       }
       // Try to keep the same selection (id may differ; match by index).
       const matchIdx = snapshot.findIndex((s) => s.id === previouslySelected);
@@ -3039,9 +3093,19 @@
       // the selected mesh (see applyLodForMesh) so the per-splat mask
       // indexes line up with the rendered splats; this is what makes the
       // brush actually paint the splats the user clicks on.
-      if ((mode === "shadow" || mode === "undo") && !getSelected()) {
-        showOverlay("Select an object first");
-        return;
+      if (mode === "shadow" || mode === "undo") {
+        const sel = getSelected();
+        if (!sel) {
+          showOverlay("Select an object first");
+          return;
+        }
+        // Same lock the UI buttons enforce — hotkeys 1/2 must not slip
+        // into paint mode on an LOD-built mesh (its per-splat mask can't
+        // address the reordered pyramid splats).
+        if (sel.splatMesh && isLodBuiltMesh(sel.splatMesh)) {
+          showOverlay("Turn LOD off (Scene panel) to paint");
+          return;
+        }
       }
       PARAMETERS.shadowEnabled.value = mode === "shadow";
       PARAMETERS.undoEnabled.value   = mode === "undo";
