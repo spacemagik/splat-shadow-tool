@@ -1498,6 +1498,22 @@
     // here.
 
     const controls = new SparkControls({ canvas: renderer.domElement });
+    // Fly speed in world units/sec. Spark's default of 1 is imperceptible
+    // in splat captures that span tens-to-hundreds of world units — it made
+    // WASD feel completely dead. Auto-scaled to the scene size on first
+    // load (see frameCameraOnMesh) and user-tunable via the Scene folder.
+    const FLY = { speed: 2 };
+    function setFlySpeed(s) {
+      FLY.speed = s;
+      controls.fpsMovement.moveSpeed = s;
+    }
+    setFlySpeed(FLY.speed);
+    // Q/E vertical movement is handled by us in the render loop so it's
+    // WORLD up/down (Spark's built-in KeyQ/KeyE move along the camera's
+    // local Y, which drifts sideways when you're pitched up/down). Remove
+    // them from Spark's mapping so the two don't double-apply.
+    delete controls.fpsMovement.keycodeMoveMapping.KeyQ;
+    delete controls.fpsMovement.keycodeMoveMapping.KeyE;
     const camera = new THREE.PerspectiveCamera(
       50, window.innerWidth / window.innerHeight, 0.01, 1000,
     );
@@ -1574,6 +1590,12 @@
         camera.near = Math.max(0.01, dist * 0.001);
         camera.far  = Math.max(1000, dist * 50);
         camera.updateProjectionMatrix();
+
+        // Scale fly speed to the scene so WASD/QE cover it in a few
+        // seconds regardless of capture units. Only runs on first-load
+        // framing, so a user-tuned slider value survives LOD reloads.
+        setFlySpeed(Math.min(150, Math.max(2, radius * 0.3)));
+        flySpeedCtl?.updateDisplay();
       } catch (e) {
         console.warn("frameCameraOnMesh failed; leaving camera as-is", e);
       }
@@ -2784,6 +2806,12 @@
       .add(LOD, "quality", 1.1, 2.0, 0.05)
       .name("LOD detail (1.1=sharp)")
       .onFinishChange(() => { if (LOD.enabled) reloadAllObjects("Rebuilding LOD…"); });
+    // WASD/QE speed. Auto-scaled to the scene on first load; hold Shift
+    // to fly 5x faster, Ctrl for 1/5 slow.
+    const flySpeedCtl = sceneFolder
+      .add(FLY, "speed", 0.5, 150, 0.5)
+      .name("Fly speed (WASD/QE)")
+      .onChange((v) => setFlySpeed(v));
     sceneFolder.open();
 
     const shadowFolder = gui.addFolder("Shadow");
@@ -3216,8 +3244,23 @@
     // -----------------------------------------------------------------------
     // Render loop
     // -----------------------------------------------------------------------
+    let lastFlyTime = performance.now();
     renderer.setAnimationLoop(() => {
       controls.update(camera);
+      // World-vertical fly on Q (down) / E (up). Reuses Spark's document-
+      // level key tracking (incl. window-blur clearing) and its Shift/Ctrl
+      // speed multipliers so vertical speed matches WASD.
+      const now = performance.now();
+      const dt = Math.min(0.1, (now - lastFlyTime) / 1000);
+      lastFlyTime = now;
+      const kc = controls.fpsMovement.keycode;
+      const vert = (kc.KeyE ? 1 : 0) - (kc.KeyQ ? 1 : 0);
+      if (vert && !(document.activeElement instanceof HTMLInputElement)) {
+        let mult = 1;
+        if (kc.ShiftLeft || kc.ShiftRight) mult *= controls.fpsMovement.shiftMultiplier;
+        if (kc.ControlLeft || kc.ControlRight) mult *= controls.fpsMovement.ctrlMultiplier;
+        camera.position.y += vert * FLY.speed * mult * dt;
+      }
       // Parented volumes follow their parent's transform; cylinders
       // mirror gizmo X scale into Spark's scalar radius. Cheap, CPU-side.
       syncVolumes();

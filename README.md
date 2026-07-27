@@ -145,12 +145,18 @@ practice this means:
 
 | Key             | Action                                |
 | --------------- | ------------------------------------- |
+| `W A S D`       | Fly forward / left / back / right     |
+| `E` / `Q`       | Fly up / down (world vertical)        |
+| `Shift` (hold)  | Fly 5x faster (`Ctrl` = 1/5 slow)     |
 | `1`             | Shadow brush mode                     |
 | `2`             | Undo brush mode (restores original)   |
 | `Esc`           | Orbit / view mode                     |
 | `-` / `=`       | Decrease / increase brush radius      |
 | `[` / `]`       | Decrease / increase brush depth       |
 | Mouse drag      | In view mode: orbit; in brush modes: paint |
+
+Fly speed auto-scales to the size of the first loaded splat and can be
+tuned with **Scene → Fly speed (WASD/QE)**.
 
 The GUI also exposes:
 
