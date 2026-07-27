@@ -335,15 +335,32 @@
       text-transform: uppercase;
     }
 
-    /* ---------- Objects panel ----------------------------------------- */
-    #objects-panel {
+    /* ---------- Left column (Objects + Shadow volumes) ----------------
+       One vertical stack under the brand badge, so all scene-content
+       controls live in a single predictable place. The right side stays
+       reserved for the (tall) lil-gui settings panel. */
+    #left-column {
+      position: absolute;
+      z-index: 10;
       top: 70px;
       left: 18px;
       width: 240px;
+      max-height: calc(100vh - 88px);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      pointer-events: none;
+    }
+    #left-column > .ui-layer {
+      position: static;
+      pointer-events: auto;
+    }
+
+    /* ---------- Objects panel ----------------------------------------- */
+    #objects-panel {
       padding: 10px 10px 8px;
       font-size: 12px;
       color: var(--text-mute);
-      pointer-events: auto;
       user-select: none;
     }
     #objects-panel.hidden { display: none; }
@@ -476,21 +493,21 @@
     }
 
     /* ---------- Volumes panel (shadow boxes / cylinders) --------------
-       Sits at bottom-left under the Objects panel. We deliberately keep
-       the right column reserved for the (tall) lil-gui so they never
-       overlap. */
+       Stacks directly under the Objects panel inside #left-column. */
     #volumes-panel {
-      top: auto;
-      bottom: 18px;
-      left: 18px;
-      width: 240px;
       padding: 10px 10px 8px;
       font-size: 12px;
       color: var(--text-mute);
-      pointer-events: auto;
       user-select: none;
     }
     #volumes-panel.hidden { display: none; }
+    #volumes-empty {
+      padding: 2px 6px 8px;
+      font-size: 11px;
+      line-height: 1.5;
+      color: var(--text-dim);
+    }
+    #volumes-empty.hidden { display: none; }
     #volumes-panel .panel-label {
       font-size: 10px;
       letter-spacing: 0.18em;
@@ -888,6 +905,10 @@
     <div class="name">Shadow <span>· splat brush</span></div>
   </div>
 
+  <!-- Left column: everything scene-content related lives in ONE stack
+       (objects on top, shadow volumes directly beneath) so the controls
+       aren't scattered across the corners of the window. -->
+  <div id="left-column">
   <div id="objects-panel" class="ui-layer glass hidden">
     <div class="panel-label">Objects</div>
     <div id="gizmo-toolbar" role="tablist" aria-label="Gizmo mode">
@@ -918,6 +939,10 @@
 
   <div id="volumes-panel" class="ui-layer glass hidden">
     <div class="panel-label">Shadow volumes</div>
+    <div id="volumes-empty" class="hidden">
+      Soft shadow shapes you can move around. Set a volume's Parent to an
+      object and it travels with it.
+    </div>
     <ul id="volumes-list"></ul>
     <div id="volume-style" class="hidden">
       <div class="vol-style-head" id="vol-style-head">Selected volume</div>
@@ -948,6 +973,7 @@
       </button>
     </div>
   </div>
+  </div><!-- /left-column -->
 
   <div id="mode-bar" class="ui-layer glass" role="tablist" aria-label="Tool mode">
     <button class="mode-btn" data-mode="view"   type="button"><span class="dot"></span>Orbit<kbd>Esc</kbd></button>
@@ -1184,11 +1210,9 @@
     // per-volume soft-edge falloff; the SplatEditSdf carries the shape
     // (box / cylinder), color (= darkness), opacity, and transform
     // (which the gizmo edits). Giving each volume its own edit is what
-    // lets intensity AND edge softness be tuned per volume, and lets a
-    // volume be SCOPED to a single object: Spark only treats an edit as
-    // "global" (applied to every SplatMesh) when it has no SplatMesh
-    // ancestor — so mounting a volume's edit under one object's
-    // SplatMesh darkens only that object (see mountVolumeEdit).
+    // lets intensity AND edge softness be tuned per volume. Every edit
+    // is mounted at the scene root so Spark applies it globally — a
+    // volume darkens ALL splats it overlaps (see mountVolumeEdit).
     //
     // We keep each edit's `.sdfs` array as the source of truth. The
     // SplatEditSdf nodes always live at the SCENE ROOT — never under a
@@ -1256,20 +1280,19 @@
       v.sdfNode.opacity = 1;
     }
 
-    // Re-mount a volume's SplatEdit so its scope matches its parent:
-    // under the parent object's SplatMesh (darkens only that object) or
-    // at the scene root (global — darkens everything). The SDF node is
-    // left untouched at the scene root. `scene` / `objects` don't exist
-    // yet at this point in the file but this only runs at interaction
-    // time, long after both are defined.
+    // Mount a volume's SplatEdit at the scene root so it darkens EVERY
+    // splat it overlaps, regardless of parenting. (An earlier version
+    // scoped the edit to the parent's SplatMesh, but that made a shadow
+    // box parented to e.g. a car stop darkening the ground beneath it —
+    // exactly the splats a drop shadow is supposed to hit. Parenting is
+    // purely a transform-follow relationship; see setVolumeParent.)
+    // `scene` doesn't exist yet at this point in the file but this only
+    // runs at interaction time, long after it's defined.
     function mountVolumeEdit(v) {
       if (!v || !v.edit) return;
+      if (v.edit.parent === scene) return;
       v.edit.parent?.remove(v.edit);
-      const parentObj = v.parentId != null
-        ? objects.find((o) => o.id === v.parentId)
-        : null;
-      const host = parentObj?.splatMesh ?? scene;
-      host.add(v.edit);
+      scene.add(v.edit);
     }
 
     // Per-frame upkeep (parent following + cylinder radius mirroring)
@@ -1493,9 +1516,8 @@
     scene.add(spark);
 
     // Shadow-volume edits are created and mounted per-volume in addVolume
-    // / mountVolumeEdit (global ones land on the scene root, scoped ones
-    // under their parent object's SplatMesh), so there's nothing to mount
-    // here.
+    // / mountVolumeEdit (all on the scene root, so every volume darkens
+    // the whole scene), so there's nothing to mount here.
 
     const controls = new SparkControls({ canvas: renderer.domElement });
     // Fly speed in world units/sec. Spark's default of 1 is imperceptible
@@ -1749,9 +1771,8 @@
       if (idx === -1) return;
       const obj = objects[idx];
       // Orphan any volumes parented to this splat BEFORE we remove the
-      // splat from the scene — setVolumeParent uses attach() to preserve
-      // the volumes' world transforms, but only works while the old
-      // parent still has a valid matrixWorld.
+      // splat from the scene, so they stop following a mesh that no
+      // longer exists (their SDF nodes keep their current world pose).
       for (const v of volumes) {
         if (v.parentId === id) setVolumeParent(v.id, null);
       }
@@ -1928,6 +1949,7 @@
     // -----------------------------------------------------------------------
     const volumesPanelEl = document.getElementById("volumes-panel");
     const volumesListEl  = document.getElementById("volumes-list");
+    const volumesEmptyEl = document.getElementById("volumes-empty");
     const addBoxBtn      = document.getElementById("volumes-add-box");
     const addCylBtn      = document.getElementById("volumes-add-cyl");
 
@@ -2082,9 +2104,7 @@
       scene.add(sdfNode);
 
       // Each volume gets its OWN edit so intensity + edge softness are
-      // independent per volume, and so it can be scoped to a single
-      // object by mounting the edit under that object's SplatMesh
-      // (mountVolumeEdit). Spark reads the shape via `edit.sdfs`.
+      // independent per volume. Spark reads the shape via `edit.sdfs`.
       const edit = new SplatEdit({
         rgbaBlendMode: "multiply",
         softEdge: DEFAULT_VOLUME_STYLE.softness,
@@ -2118,7 +2138,7 @@
         parentLocal: null,   // Matrix4 offset relative to parent (set by setVolumeParent)
       };
       volumes.push(v);
-      mountVolumeEdit(v);    // free-standing → global until parented to an object
+      mountVolumeEdit(v);    // darkening is always global (scene root)
       applyVolumeStyle(v);
       styleVolumeHelper(v);
       selectVolume(id);
@@ -2167,8 +2187,8 @@
         v.parentId = null;
         v.parentLocal = null;
       }
-      // Re-scope the darkening: under the new parent's SplatMesh (affects
-      // only that object) or back at the scene root (global).
+      // The darkening itself always stays global (scene root) — a
+      // parented volume still shadows the ground/other objects under it.
       mountVolumeEdit(v);
     }
 
@@ -2246,6 +2266,8 @@
       // there are also no splats to keep the chrome minimal.
       const showPanel = volumes.length > 0 || hasObjects();
       volumesPanelEl.classList.toggle("hidden", !showPanel);
+      // One-line explainer shown until the first volume is added.
+      volumesEmptyEl.classList.toggle("hidden", volumes.length > 0);
 
       volumesListEl.innerHTML = "";
       for (const v of volumes) {
@@ -2295,7 +2317,7 @@
 
           const select = document.createElement("select");
           select.className = "parent-select";
-          select.title = "Attach this volume to a splat object — it then darkens ONLY that object and follows its transform. (scene) = affects every object.";
+          select.title = "Attach this volume to a splat object so it moves/rotates/scales with it. The shadow still darkens everything it touches (like the ground under a car). (scene) = free-standing.";
 
           const noneOpt = document.createElement("option");
           noneOpt.value = "";
@@ -2838,8 +2860,7 @@
     // ---- Shadow volumes folder ------------------------------------------
     // Just the add / remove buttons live here now — per-volume Intensity
     // and Edge softness are inline on each row of the on-screen Shadow
-    // volumes panel, so every box / cylinder is tuned (and scoped to its
-    // parent object) independently.
+    // volumes panel, so every box / cylinder is tuned independently.
     const volumesFolder = gui.addFolder("Shadow volumes");
     const volumeActions = {
       addBox:      () => addVolume("box"),

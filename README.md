@@ -75,7 +75,7 @@ rotate, or scale the splat.
 For shadows that don't conform to a brush stroke — say, a soft cast
 shadow under a piece of furniture, or a column of darkness inside a
 room — drop **shadow volumes** into the scene from the **Shadow
-volumes** panel at the bottom left:
+volumes** panel (in the left column, under Objects):
 
 - **+ Box** adds a cube-shaped shadow region.
 - **+ Cylinder** adds a cylindrical shadow region (axis = Y).
@@ -98,14 +98,13 @@ one volume:
   volume's local space. Larger = softer / cloudier shadow. Smaller =
   hard interior with quick falloff at the edge.
 
-By default a volume is global — it shadows every loaded splat. To make
-a volume affect **only one object**, set its **Parent** to that object
-(see below): the shadow is then scoped to that object alone, so you can
-give each box its own volumes without darkening the others. Volumes
-stack with the brush mask (a splat inside a volume AND painted by the
-brush gets both effects). When you **Save shadowed SPZ**, each volume's
-contribution is baked into whichever objects it affects, so the
-exported file already has the shadow burned into the splat colors.
+A volume always darkens **every splat it overlaps**, no matter which
+object those splats belong to — a shadow box parented to a car still
+darkens the ground beneath the car, exactly like a real drop shadow.
+Volumes stack with the brush mask (a splat inside a volume AND painted
+by the brush gets both effects). When you **Save shadowed SPZ**, each
+volume's contribution is baked into whichever objects it affects, so
+the exported file already has the shadow burned into the splat colors.
 
 Volumes are implemented with Spark's native SDF splat edits
 (`SplatEdit` + `SplatEditSdf`), up to `MAX_VOLUMES` (32) at once.
@@ -113,15 +112,12 @@ Volumes are implemented with Spark's native SDF splat edits
 ### Parenting volumes to objects
 
 Each volume row has a **Parent** dropdown that lets you attach the
-volume to one of the loaded splat objects (or leave it under the scene
-root with `(scene)`). Parenting does two things:
-
-1. **Scopes the shadow** — a parented volume darkens **only** that
-   object, leaving every other splat untouched. `(scene)` makes it
-   global again (darkens everything).
-2. **Follows the transform** — moving, rotating, or scaling the splat
-   with the gizmo carries the volume along with it, so the shadow stays
-   glued to the object.
+volume to one of the loaded splat objects (or leave it free-standing
+with `(scene)`). Parenting means the volume **follows the object's
+transform** — moving, rotating, or scaling the splat with the gizmo
+carries the volume along with it, so the shadow stays glued to the
+object. It does NOT restrict what gets darkened: the volume keeps
+shadowing everything it touches (ground, walls, other objects).
 
 Parenting is **logical**, not a scene-graph `attach`: the volume's SDF
 node stays at the scene root, and each frame its transform is
