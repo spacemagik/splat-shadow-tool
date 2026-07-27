@@ -1670,6 +1670,25 @@
       setOrbitEnabled(!event.value);
     });
 
+    // Splat meshes must keep a UNIFORM scale: Spark renders a SplatMesh
+    // with the average of the three scale axes, so dragging a single
+    // axis handle looks like nothing happened in the viewport while the
+    // stored matrix silently goes non-uniform (and would export
+    // distorted). Snap the scale back to its average live during the
+    // drag — single-axis drags just become uniform scaling. Shadow
+    // volumes are exempt: per-axis scaling is how you flatten a box
+    // into a ground shadow, and Spark's SDF path renders it correctly.
+    transformControls.addEventListener("objectChange", () => {
+      const t = transformControls.object;
+      if (!t || transformControls.mode !== "scale") return;
+      const isSplat = objects.some((o) => o.splatMesh === t);
+      if (!isSplat) return;
+      const s = t.scale;
+      if (s.x !== s.y || s.y !== s.z) {
+        s.setScalar((s.x + s.y + s.z) / 3);
+      }
+    });
+
     // -----------------------------------------------------------------------
     // Splat loading
     // -----------------------------------------------------------------------
@@ -3047,21 +3066,26 @@
           const _splatPos  = new THREE.Vector3();
           const _splatQuat = new THREE.Quaternion();
           const _splatScl  = new THREE.Vector3();
+          const _uniScale  = new THREE.Vector3();
+          const _bakeMat   = new THREE.Matrix4();
 
           let writeIdx = 0;
           for (const { obj, rgbaBytes } of baked) {
             obj.splatMesh.updateMatrixWorld(true);
             obj.splatMesh.matrixWorld.decompose(_objPos, _objQuat, _objScale);
 
-            // Gaussian splats are anisotropic, so a fully-correct
-            // non-uniform parent scale would require composing the
-            // covariance per splat (M·Σ·Mᵀ) and re-decomposing. Users
-            // almost always uniform-scale via the gizmo, so we collapse
-            // any drift to the average — exact for uniform scales,
-            // close enough for mild non-uniform ones, and (importantly)
-            // matches what the live tool view shows because Spark's own
-            // gsplat path averages too.
+            // WYSIWYG rule: export EXACTLY what Spark renders. Spark's
+            // TrsSplatTransformer collapses the mesh's world matrix to
+            // translate + rotate + UNIFORM average scale — a non-uniform
+            // scale on a SplatMesh is invisible in the viewport. So we
+            // must bake with the same collapsed TRS. Baking the full
+            // matrixWorld instead (as an earlier version did) stretches
+            // splat positions along the scaled axis in the file while
+            // the viewport shows none of it — an object accidentally
+            // axis-scaled via the gizmo exported as a squashed plank.
             const sScale = (_objScale.x + _objScale.y + _objScale.z) / 3;
+            _uniScale.setScalar(sScale);
+            _bakeMat.compose(_objPos, _objQuat, _uniScale);
 
             const ogSplats = obj.splatMesh.packedSplats;
             const totalSplats = ogSplats.numSplats;
@@ -3081,10 +3105,10 @@
                 continue;
               }
 
-              // Apply the parent's world transform to the splat
-              // geometry: position by full matrixWorld, orientation by
-              // composed quaternion, scale by the uniform multiplier.
-              _splatPos.copy(u.center).applyMatrix4(obj.splatMesh.matrixWorld);
+              // Apply the same TRS Spark renders with: position via the
+              // collapsed uniform-scale matrix, orientation by composed
+              // quaternion, scale by the uniform multiplier.
+              _splatPos.copy(u.center).applyMatrix4(_bakeMat);
               _splatQuat.copy(_objQuat).multiply(u.quaternion);
               _splatScl.copy(u.scales).multiplyScalar(sScale);
 
