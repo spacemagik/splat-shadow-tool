@@ -81,16 +81,20 @@ volumes** panel (in the left column, under Objects):
 - **+ Cylinder** adds a cylindrical shadow region (axis = Y).
 
 Each volume is a normal scene object, so the same gizmo lets you
-**move / rotate / scale** it (click its row in the panel, or click the
-wireframe in the viewport). Splats that fall inside the volume get
-darkened with a smooth SDF falloff — darkest at the center, fading to
-no effect at the edge.
+**move / rotate / scale** it — click its row in the panel to select it.
+Splats that fall inside the volume get darkened with a smooth SDF
+falloff — darkest at the center, fading to no effect at the edge.
+
+**Only the selected volume shows its wireframe.** Splats don't write to
+the depth buffer, so a wireframe can never be hidden behind the ground —
+an always-visible helper would draw "through" the whole scene. Deselect
+(click empty space or another object) and the box outline disappears,
+leaving just the shadow it casts.
 
 **Every volume is tuned independently.** Rather than a slider on every
 row, the **Shadow volumes** panel has a single pair of sliders that
-retarget to whichever volume is currently selected (click a row, or
-click the wireframe in the viewport). Adjusting them affects only that
-one volume:
+retarget to whichever volume is currently selected. Adjusting them
+affects only that one volume:
 
 - **Intensity** — `0` = no shadow, `1` = pure black at the volume's
   center.

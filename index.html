@@ -2051,9 +2051,16 @@
     function styleVolumeHelper(v) {
       if (!v.helperRoot) return;
       const isSel = v.id === selectedVolumeId;
-      const color = isSel ? VOLUME_COLOR_SELECTED : VOLUME_COLOR_BASE;
-      const wireOpacity  = isSel ? 1.0  : 0.7;
-      const solidOpacity = isSel ? 0.10 : 0.05;
+      // Only the SELECTED volume shows its wireframe. Splats don't write
+      // depth, so a helper can't be occluded by the ground — an always-on
+      // wireframe would draw "through" everything (a huge box hanging in
+      // the air under a car). Deselect and the box disappears; the shadow
+      // it casts stays, exactly like the brush shadows.
+      v.helperRoot.visible = isSel;
+      if (!isSel) return;
+      const color = VOLUME_COLOR_SELECTED;
+      const wireOpacity  = 1.0;
+      const solidOpacity = 0.10;
       v.helperRoot.traverse((node) => {
         if (!node.material) return;
         node.material.color.setHex(color);
@@ -2668,9 +2675,14 @@
       // visual helper as a child). The solid mesh inside catches the
       // rays; the wireframe LineSegments don't have a meaningful "fill"
       // hit and are ignored by raycaster.intersectObject.
+      // Only the selected volume's helper is visible (see
+      // styleVolumeHelper) — skip hidden ones so an invisible box can't
+      // swallow clicks meant for splats / empty space. Unselected
+      // volumes are picked from their panel row instead.
       let bestVol = null;
       for (const v of volumes) {
         if (!v.sdfNode) continue;
+        if (!v.helperRoot?.visible) continue;
         const volHits = raycaster.intersectObject(v.sdfNode, true);
         if (volHits.length === 0) continue;
         const closest = volHits[0].distance;
