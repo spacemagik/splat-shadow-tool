@@ -3282,6 +3282,12 @@
       );
       brushCursor.visible = true;
     }
+    // Re-apply shape/size to the on-screen cursor immediately when the
+    // Size slider or Shape toggle changes (otherwise it wouldn't update
+    // until the next pointer move over the canvas).
+    function refreshBrushCursor() {
+      updateBrushCursor(brushHitDist);
+    }
 
     // World-space distance along the current pointer ray to the splat
     // surface the brush is anchored on, or null when the pointer isn't
@@ -3776,10 +3782,14 @@
     brushFolder
       .add(PARAMETERS, "brushShape", { Circle: "circle", Square: "square" })
       .name("Shape")
-      .onChange((v) => { PARAMETERS.brushSquare.value = v === "square"; });
+      .onChange((v) => {
+        PARAMETERS.brushSquare.value = v === "square";
+        refreshBrushCursor();
+      });
     const radiusCtl = brushFolder
       .add(PARAMETERS.brushRadius, "value", MIN_BRUSH_RADIUS, MAX_BRUSH_RADIUS, 0.005)
-      .name("Size");
+      .name("Size")
+      .onChange(refreshBrushCursor);
     const depthCtl = brushFolder
       .add(PARAMETERS.brushDepth, "value", MIN_BRUSH_DEPTH, MAX_BRUSH_DEPTH, 0.1)
       .name("Depth");
@@ -3801,7 +3811,7 @@
       .onChange((v) => { transformControls.setSpace(v); });
     gizmoFolder
       .add(gizmoUI, "size", 0.4, 1.6, 0.05)
-      .name("Size")
+      .name("Handle size") // arrows/rings of the move gizmo — NOT the brush
       .onChange((v) => { transformControls.size = v; });
     gizmoFolder.open();
 
@@ -4335,6 +4345,7 @@
             PARAMETERS.brushRadius.value + 0.01, MAX_BRUSH_RADIUS,
           );
           radiusCtl.updateDisplay();
+          refreshBrushCursor();
           break;
         }
         case "-": case "_": {
@@ -4342,6 +4353,7 @@
             PARAMETERS.brushRadius.value - 0.01, MIN_BRUSH_RADIUS,
           );
           radiusCtl.updateDisplay();
+          refreshBrushCursor();
           break;
         }
         case "]": {
