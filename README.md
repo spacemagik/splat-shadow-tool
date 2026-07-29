@@ -149,7 +149,8 @@ practice this means:
 | `E` / `Q`       | Fly up / down (world vertical)        |
 | `Shift` (hold)  | Fly 5x faster (`Ctrl` = 1/5 slow)     |
 | `1`             | Shadow brush mode                     |
-| `2`             | Undo brush mode (restores original)   |
+| `2`             | Eraser brush mode (brushes shadows away) |
+| `Cmd/Ctrl + Z`  | Undo last stroke / gizmo drag / reset / added volume |
 | `Esc`           | Orbit / view mode                     |
 | `-` / `=`       | Decrease / increase brush radius      |
 | `[` / `]`       | Decrease / increase brush depth       |
@@ -158,10 +159,26 @@ practice this means:
 Fly speed auto-scales to the size of the first loaded splat and can be
 tuned with **Scene → Fly speed (WASD/QE)**.
 
+**Projects (autosave)** — the whole scene (loaded files, object positions,
+painted shadows, shadow volumes + parenting, camera, fly speed) is
+continuously saved to the browser's IndexedDB as a *project*. The start
+screen lists your recent projects — click one to load it, or `×` to delete
+it. Starting a new scene creates a new project; older ones stay available.
+Autosave is best-effort: in private browsing or with storage disabled the
+tool still works, projects just won't survive a refresh.
+
+**Undo (`Cmd/Ctrl+Z`)** steps back through your recent actions: brush
+strokes (shadow and eraser), gizmo moves/rotates/scales of objects and
+shadow volumes, shadow resets, and added volumes. The **Eraser** brush
+(`2`) instead brushes painted shadow away selectively — it erases faster
+than the shadow brush paints and always restores the original colors
+exactly. Note that neither can remove shadows that were already baked
+into a file by a previous save; those are part of the splat colors.
+
 The GUI also exposes:
 
-- **Brush → Shape** — `Circle` (cylindrical brush) or `Square` (rectangular prism, screen-aligned).
-- **Brush → Size / Depth** — radius (or square half-edge) and how far the brush extends along the ray.
+- **Brush → Shape** — `Circle` (cylindrical brush) or `Square` (rectangular prism, screen-aligned). The brush outline is always visible on the surface under the pointer, sized to the exact painted area (white in Shadow mode, blue in Eraser mode).
+- **Brush → Size / Depth** — radius (or square half-edge) and how deep beyond the surface the brush penetrates, both in world units. The brush anchors on the splat surface it hovers, so Depth is independent of how far away the camera is.
 - **Shadow strength** — full-stroke target darkness (`0` = no effect, `0.5` = aggressive). Pure per-channel darken, so hue & saturation are preserved.
 - **Flow (per-stamp)** — how much of the strength each individual stamp deposits (low = airbrush-style gradual buildup, high = heavy stamp). Combined with cursor-distance throttling, this stops slow drags from piling up dark blobs in one spot.
 - **Edge softness** — `0` = sharp brush boundary, `1` = full smooth falloff from center to edge. Soft edges naturally build penumbra over multiple strokes because edge splats are darkened less per pass.
@@ -169,6 +186,15 @@ The GUI also exposes:
 - **Reset shadows on selection** — clears the selected object's shadow mask
   back to identity. Other objects are unaffected.
 - **Add object** — load another `.spz` / `.ply` / `.splat` / `.ksplat` into the scene.
+- **Save → Record 7s showcase video** — records a cinematic 7-second clip
+  of the current scene: all UI is hidden, the camera does a slow orbital
+  pull-in, and the hero object (the selected prop, or the smallest object
+  in the scene) gently lifts, drifts and settles — with any parented shadow
+  volumes tracking it live. The clip downloads as MP4 (H.264) where the
+  browser supports it, otherwise WebM, at the canvas resolution — maximize
+  the window or go fullscreen for a higher-res video. Frame your shot
+  first; the move starts from the current camera view. `Esc` ends the take
+  early. Scene and camera are restored exactly afterwards.
 - **Save → Save shadowed SPZ** — bake **every loaded object** into a single
   `.spz` file in world space and download it. Each object's gizmo placement
   (translation / rotation / scale) is composed into its splats so the export

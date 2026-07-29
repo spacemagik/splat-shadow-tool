@@ -197,6 +197,12 @@
     }
     #mode-overlay.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+    /* While recording the showcase video every piece of chrome is hidden so
+       the canvas frames are clean — panels, gui, gizmo styling, cursor. */
+    body.recording .ui-layer,
+    body.recording .lil-gui { visibility: hidden !important; }
+    body.recording, body.recording canvas { cursor: none !important; }
+
     /* ---------- Loading indicator -------------------------------------- */
     #loading {
       position: absolute;
@@ -327,6 +333,83 @@
     }
     #dropzone .browse:hover  { filter: brightness(1.04); box-shadow: 0 12px 32px rgba(244,184,96,0.34), inset 0 1px 0 rgba(255,255,255,0.5); }
     #dropzone .browse:active { transform: translateY(1px); }
+    #dropzone .projects {
+      margin-top: 18px;
+      padding-top: 14px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      text-align: left;
+      max-height: 220px;
+      overflow-y: auto;
+    }
+    #dropzone .projects.hidden { display: none; }
+    #dropzone .projects-label {
+      font-size: 11px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      margin-bottom: 8px;
+      text-align: center;
+    }
+    #dropzone .proj-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 6px 0;
+    }
+    #dropzone .proj-load {
+      flex: 1;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+      padding: 10px 14px;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.12);
+      color: rgba(255,255,255,0.88);
+      font: inherit;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    #dropzone .proj-load:hover {
+      background: rgba(255,255,255,0.09);
+      border-color: rgba(255,255,255,0.24);
+    }
+    #dropzone .proj-load:disabled { opacity: 0.6; cursor: default; }
+    #dropzone .proj-load .proj-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #dropzone .proj-load .proj-meta {
+      font-weight: 500;
+      font-size: 11px;
+      color: var(--text-dim);
+      white-space: nowrap;
+      flex: none;
+    }
+    #dropzone .proj-del {
+      flex: none;
+      width: 30px;
+      height: 30px;
+      border-radius: 9px;
+      background: transparent;
+      border: 1px solid rgba(255,255,255,0.10);
+      color: var(--text-dim);
+      font: inherit;
+      font-size: 15px;
+      line-height: 1;
+      cursor: pointer;
+      transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    }
+    #dropzone .proj-del:hover {
+      background: rgba(255,110,110,0.12);
+      border-color: rgba(255,110,110,0.4);
+      color: #ff9a9a;
+    }
     #dropzone .hint {
       margin-top: 16px;
       font-size: 11px;
@@ -978,7 +1061,7 @@
   <div id="mode-bar" class="ui-layer glass" role="tablist" aria-label="Tool mode">
     <button class="mode-btn" data-mode="view"   type="button"><span class="dot"></span>Orbit<kbd>Esc</kbd></button>
     <button class="mode-btn" data-mode="shadow" type="button"><span class="dot"></span>Shadow<kbd>1</kbd></button>
-    <button class="mode-btn" data-mode="undo"   type="button"><span class="dot"></span>Undo<kbd>2</kbd></button>
+      <button class="mode-btn" data-mode="undo"   type="button"><span class="dot"></span>Erase<kbd>2</kbd></button>
   </div>
 
   <div id="mode-overlay" class="ui-layer glass"></div>
@@ -1014,6 +1097,10 @@
         </button>
       </div>
       <div class="hint">Drag &amp; drop also works</div>
+      <div id="projects-panel" class="projects hidden">
+        <div class="projects-label">Recent projects</div>
+        <div id="projects-list"></div>
+      </div>
     </div>
   </div>
 
@@ -1095,7 +1182,9 @@
     const STAMP_MIN_INTERVAL_MS = 8;
 
     const MIN_BRUSH_RADIUS = 0.01;
-    const MAX_BRUSH_RADIUS = 0.4;
+    // World units (the bake converts per-object). 2.0 lets one stroke
+    // blanket a whole prop like the car.
+    const MAX_BRUSH_RADIUS = 2.0;
     const MIN_BRUSH_DEPTH = 0.1;
     const MAX_BRUSH_DEPTH = 100.0;
 
@@ -1278,6 +1367,7 @@
       const k = Math.max(0, 1 - v.intensity);
       v.sdfNode.color.setRGB(k, k, k);
       v.sdfNode.opacity = 1;
+      scheduleSceneSave(); // persist style tweaks (no-op during restore)
     }
 
     // Mount a volume's SplatEdit at the scene root so it darkens EVERY
@@ -1435,10 +1525,23 @@
             stamp, dyno.select(PARAMETERS.undoEnabled, ONE, ZERO),
           );
           // Shadow: scale mask by mix(1, channelMul, shadowAmount).
-          // Undo: blend mask back toward 1 by undoAmount.
           const shadowMul = dyno.mix(oneVec4, channelMul4, shadowAmount);
           let newMask = dyno.mul(currentMask, shadowMul);
-          newMask     = dyno.mix(newMask, oneVec4, undoAmount);
+          // Erase: blend the mask back toward 1, boosted 3x relative to the
+          // shadow flow so erasing keeps up with painting (multiplicative
+          // darkening compounds much faster than a linear blend recovers).
+          const undoRate = dyno.min(ONE, dyno.mul(undoAmount, dyno.dynoFloat(3.0)));
+          newMask = dyno.mix(newMask, oneVec4, undoRate);
+          // The mask is quantized to 8 bits, so a pure mix() stalls a few
+          // counts below 1.0 — once a step rounds to less than 1/255 the
+          // value stops moving, leaving a permanent faint ghost the eraser
+          // could never remove. Bias every erased splat up by ~1.5 counts
+          // per stamp so it converges to exactly 1 (fully restored).
+          const undoGate = dyno.step(dyno.dynoFloat(1e-4), undoAmount);
+          newMask = dyno.min(
+            oneVec4,
+            dyno.add(newMask, dyno.mul(undoGate, dyno.dynoFloat(1.5 / 255))),
+          );
 
           return { rgba8: newMask };
         },
@@ -1659,15 +1762,151 @@
       }
     }
 
+    // -----------------------------------------------------------------------
+    // Undo history (Cmd/Ctrl+Z)
+    // -----------------------------------------------------------------------
+    // Session-wide undo stack. Each entry knows how to restore one action:
+    //   • "mask"      — a brush stroke or a shadow reset. The pre-action
+    //                    shadow mask is kept alive on the GPU (instead of
+    //                    being disposed), so undo is an O(1) texture swap.
+    //   • "transform" — a gizmo drag on a splat object or shadow volume.
+    //   • "addVolume" — a volume was added; undo removes it again.
+    // Mask snapshots cost 4 bytes/splat each, so besides the entry cap the
+    // stack is trimmed by a texel budget (large worlds = fewer snapshots).
+    const history = [];
+    const HISTORY_MAX_ENTRIES = 30;
+    const HISTORY_MASK_TEXEL_BUDGET = 48_000_000; // ≈192 MB of RGBA8 snapshots
+
+    function historyMaskTexels() {
+      return history.reduce(
+        (sum, e) => sum + (e.kind === "mask" ? (e.mask?.count ?? 0) : 0), 0);
+    }
+    function dropHistoryEntry(entry) {
+      if (entry?.kind === "mask") entry.mask?.dispose?.();
+    }
+    function pushHistory(entry) {
+      history.push(entry);
+      while (history.length > HISTORY_MAX_ENTRIES) dropHistoryEntry(history.shift());
+      // Trim the oldest entries when mask snapshots exceed the budget, but
+      // always keep the newest entry so at least one undo stays available.
+      while (historyMaskTexels() > HISTORY_MASK_TEXEL_BUDGET && history.length > 1) {
+        dropHistoryEntry(history.shift());
+      }
+    }
+    // Called when an object/volume is removed (delete, LOD reload) — its
+    // history entries can no longer be applied, so drop them.
+    function purgeHistoryFor(kind, id) {
+      for (let i = history.length - 1; i >= 0; i--) {
+        const e = history[i];
+        const match = kind === "object"
+          ? (e.objId === id || (e.targetKind === "object" && e.targetId === id))
+          : ((e.targetKind === "volume" && e.targetId === id) ||
+             (e.kind === "addVolume" && e.volumeId === id));
+        if (match) { dropHistoryEntry(e); history.splice(i, 1); }
+      }
+    }
+
+    function undoLast() {
+      const entry = history.pop();
+      if (!entry) {
+        showOverlay("Nothing to undo");
+        return;
+      }
+      if (entry.kind === "mask") {
+        const obj = objects.find((o) => o.id === entry.objId);
+        if (!obj?.splatMesh || !obj.shadowMask) {
+          dropHistoryEntry(entry);
+          return undoLast();
+        }
+        obj.shadowMask.dispose();
+        obj.shadowMask = entry.mask;
+        obj.splatMesh.worldModifier = shadowDyno(obj.shadowMask.dyno);
+        obj.splatMesh.updateGenerator();
+        scheduleMaskSave(obj);
+      } else if (entry.kind === "transform") {
+        if (entry.targetKind === "object") {
+          const obj = objects.find((o) => o.id === entry.targetId);
+          if (!obj?.splatMesh) return undoLast();
+          obj.splatMesh.position.copy(entry.pos);
+          obj.splatMesh.quaternion.copy(entry.quat);
+          obj.splatMesh.scale.copy(entry.scale);
+          obj.splatMesh.updateMatrixWorld(true);
+        } else {
+          const v = volumes.find((vv) => vv.id === entry.targetId);
+          if (!v?.sdfNode) return undoLast();
+          v.sdfNode.position.copy(entry.pos);
+          v.sdfNode.quaternion.copy(entry.quat);
+          v.sdfNode.scale.copy(entry.scale);
+          v.sdfNode.updateMatrixWorld(true);
+          // Parented volumes are driven from parentLocal every frame, so
+          // rebase the restored WORLD pose onto the current parent —
+          // otherwise syncVolumes would immediately overwrite the undo.
+          if (v.parentId != null) {
+            const parentObj = objects.find((o) => o.id === v.parentId);
+            if (parentObj?.splatMesh) {
+              parentObj.splatMesh.updateWorldMatrix(true, false);
+              v.parentLocal = new THREE.Matrix4()
+                .copy(parentObj.splatMesh.matrixWorld).invert()
+                .multiply(v.sdfNode.matrixWorld);
+            }
+          }
+        }
+      } else if (entry.kind === "addVolume") {
+        removeVolume(entry.volumeId);
+      }
+      scheduleSceneSave();
+      showOverlay(`Undo · ${entry.label}`);
+    }
+
     // While the user is dragging a gizmo handle we want to:
     //   1. Disable Spark's mouse-drag orbit so the camera doesn't fight it.
     //      (WASD/QE keep working — fpsMovement stays enabled.)
     //   2. Disable our brush so a pointer-down on a handle isn't mistaken
     //      for a paint stamp.
+    //   3. Snapshot the target's transform so the drag can be Cmd+Z'd.
     let gizmoDragging = false;
+    const _dragStart = {
+      has: false, targetKind: null, targetId: null, label: "",
+      pos: new THREE.Vector3(),
+      quat: new THREE.Quaternion(),
+      scale: new THREE.Vector3(),
+    };
     transformControls.addEventListener("dragging-changed", (event) => {
       gizmoDragging = event.value;
       setOrbitEnabled(!event.value);
+      const t = transformControls.object;
+      if (event.value && t) {
+        const obj = objects.find((o) => o.splatMesh === t);
+        const vol = volumes.find((v) => v.sdfNode === t);
+        _dragStart.has = !!(obj || vol);
+        if (_dragStart.has) {
+          _dragStart.targetKind = obj ? "object" : "volume";
+          _dragStart.targetId   = obj ? obj.id : vol.id;
+          _dragStart.label      = `move ${obj ? obj.name : vol.name}`;
+          _dragStart.pos.copy(t.position);
+          _dragStart.quat.copy(t.quaternion);
+          _dragStart.scale.copy(t.scale);
+        }
+      } else if (!event.value && _dragStart.has) {
+        _dragStart.has = false;
+        const changed = t && (
+          !t.position.equals(_dragStart.pos) ||
+          !t.quaternion.equals(_dragStart.quat) ||
+          !t.scale.equals(_dragStart.scale)
+        );
+        if (changed) {
+          pushHistory({
+            kind: "transform",
+            targetKind: _dragStart.targetKind,
+            targetId: _dragStart.targetId,
+            label: _dragStart.label,
+            pos: _dragStart.pos.clone(),
+            quat: _dragStart.quat.clone(),
+            scale: _dragStart.scale.clone(),
+          });
+          scheduleSceneSave();
+        }
+      }
     });
 
     // Splat meshes must keep a UNIFORM scale: Spark renders a SplatMesh
@@ -1695,6 +1934,50 @@
     const loadingEl = document.getElementById("loading");
     const dropzoneEl = document.getElementById("dropzone");
     const browseBtn = document.getElementById("browse-btn");
+    const projectsPanelEl = document.getElementById("projects-panel");
+    const projectsListEl = document.getElementById("projects-list");
+
+    // Start-screen list of saved projects — click to load one, × to delete.
+    async function renderProjectsPanel() {
+      const list = (await kvGet("projects")) ?? [];
+      projectsListEl.textContent = "";
+      projectsPanelEl.classList.toggle("hidden", list.length === 0);
+      for (const p of list) {
+        const row = document.createElement("div");
+        row.className = "proj-row";
+        const load = document.createElement("button");
+        load.className = "proj-load";
+        load.type = "button";
+        const nm = document.createElement("span");
+        nm.className = "proj-name";
+        nm.textContent = p.name || "Untitled project";
+        const meta = document.createElement("span");
+        meta.className = "proj-meta";
+        const when = new Date(p.updatedAt).toLocaleDateString(undefined, {
+          month: "short", day: "numeric",
+        });
+        meta.textContent =
+          `${p.objectCount} object${p.objectCount === 1 ? "" : "s"} · ${when}`;
+        load.append(nm, meta);
+        load.addEventListener("click", async () => {
+          if (hasObjects()) return;
+          for (const b of projectsListEl.querySelectorAll("button")) b.disabled = true;
+          nm.textContent = "Loading…";
+          await restoreSession(p.id);
+        });
+        const del = document.createElement("button");
+        del.className = "proj-del";
+        del.type = "button";
+        del.title = `Delete "${p.name}"`;
+        del.textContent = "×";
+        del.addEventListener("click", async () => {
+          if (!confirm(`Delete project "${p.name}"? This can't be undone.`)) return;
+          await deleteProject(p.id);
+        });
+        row.append(load, del);
+        projectsListEl.appendChild(row);
+      }
+    }
 
     // Force a SplatMesh into +Y-up world space (no rotation). Some
     // SplatMesh code paths overwrite the local quaternion while loading
@@ -1766,6 +2049,15 @@
         }
 
         selectObject(id);
+
+        // Session autosave: remember the file blob + scene layout. The key
+        // rides on the File object itself so LOD reloads (which re-add the
+        // same File) keep the same key — masks stay linked, no blob re-write.
+        obj.fileKey = (file.__sessionKey ??= newSessionKey());
+        if (!sessionPaused) {
+          persistFileBlob(obj.fileKey, file);
+          scheduleSceneSave();
+        }
       } catch (err) {
         console.error("Failed to load splat", err);
         // Surface the underlying error message so we don't always need
@@ -1776,7 +2068,10 @@
         alert(`Failed to load ${file.name}\n\n${msg}\n\n(See console for stack.)`);
         const idx = objects.findIndex((o) => o.id === id);
         if (idx !== -1) objects.splice(idx, 1);
-        if (!hasObjects()) dropzoneEl.classList.remove("hidden");
+        if (!hasObjects()) {
+          dropzoneEl.classList.remove("hidden");
+          renderProjectsPanel();
+        }
       } finally {
         URL.revokeObjectURL(url);
         loadingEl.classList.add("hidden");
@@ -1810,8 +2105,13 @@
       }
       if (obj.shadowMask) obj.shadowMask.dispose();
       objects.splice(idx, 1);
+      // History entries for this object can no longer be applied (and mask
+      // snapshots would leak GPU memory) — drop them.
+      purgeHistoryFor("object", id);
+      scheduleSceneSave();
       if (!hasObjects()) {
         dropzoneEl.classList.remove("hidden");
+        renderProjectsPanel();
       }
       if (selectedObjectId === id) {
         // The removed splat WAS selected — move the gizmo to the next
@@ -1824,6 +2124,314 @@
         syncSelectionState();
       }
     }
+
+    // -----------------------------------------------------------------------
+    // Session persistence — autosave to IndexedDB, restore on page load
+    // -----------------------------------------------------------------------
+    // A page refresh used to wipe the whole session (files live in memory
+    // only). Now everything is continuously saved to the browser's
+    // IndexedDB and restored automatically on the next visit:
+    //   • the original splat FILES (as blobs, keyed per object)
+    //   • each object's gizmo transform
+    //   • each object's painted shadow mask (debounced after strokes)
+    //   • shadow volumes with style + parent links
+    //   • camera pose and fly speed
+    // Persistence is best-effort: if IndexedDB is unavailable (private
+    // browsing, quota) the tool works exactly as before, just without
+    // refresh-survival.
+    const sessionDbP = new Promise((resolve) => {
+      try {
+        const req = indexedDB.open("splat-shadow-tool-session", 1);
+        req.onupgradeneeded = () => req.result.createObjectStore("kv");
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+      } catch (_) { resolve(null); }
+    });
+    async function kvOp(mode, fn) {
+      const db = await sessionDbP;
+      if (!db) return undefined;
+      return new Promise((resolve) => {
+        try {
+          const tx = db.transaction("kv", mode);
+          const req = fn(tx.objectStore("kv"));
+          tx.oncomplete = () => resolve(req?.result);
+          tx.onerror = tx.onabort = () => resolve(undefined);
+        } catch (_) { resolve(undefined); }
+      });
+    }
+    const kvGet  = (k)    => kvOp("readonly",  (s) => s.get(k));
+    const kvPut  = (k, v) => kvOp("readwrite", (s) => s.put(v, k));
+    const kvDel  = (k)    => kvOp("readwrite", (s) => s.delete(k));
+    const kvKeys = ()     => kvOp("readonly",  (s) => s.getAllKeys());
+
+    // True while restoring or while reloadAllObjects is rebuilding the
+    // scene — autosave is suspended so a transient empty/half-built scene
+    // can't clobber (or prune) the stored session.
+    let sessionPaused = false;
+
+    const persistedFileKeys = new Set();
+    const newSessionKey = () =>
+      crypto.randomUUID?.() ?? `k${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    async function persistFileBlob(fileKey, file) {
+      if (persistedFileKeys.has(fileKey)) return;
+      persistedFileKeys.add(fileKey);
+      const ok = await kvPut(`file:${fileKey}`, { name: file.name, blob: file });
+      if (ok === undefined && !(await kvGet(`file:${fileKey}`))) {
+        persistedFileKeys.delete(fileKey); // put failed (quota?) — retry later
+      }
+    }
+
+    // ---- multi-project persistence --------------------------------------
+    // The registry ("projects") lists every saved project; each one's scene
+    // doc lives at `scene:<id>`. Autosave writes to the ACTIVE project —
+    // starting a fresh scene gets a new id, so older projects survive and
+    // can be reloaded from the start screen.
+    let activeProjectId = null;
+
+    async function pruneOrphanBlobs() {
+      // Keep every file/mask referenced by the live scene or ANY saved
+      // project; delete the rest.
+      const keys = (await kvKeys()) ?? [];
+      const keep = new Set(objects.map((o) => o.fileKey).filter(Boolean));
+      for (const k of keys) {
+        if (typeof k === "string" && k.startsWith("scene:")) {
+          const d = await kvGet(k);
+          for (const o of d?.objects ?? []) keep.add(o.fileKey);
+        }
+      }
+      for (const k of keys) {
+        const m = /^(file|mask):(.+)$/.exec(k);
+        if (m && !keep.has(m[2])) {
+          kvDel(k);
+          persistedFileKeys.delete(m[2]);
+        }
+      }
+    }
+
+    async function deleteProject(id) {
+      const list = ((await kvGet("projects")) ?? []).filter((p) => p.id !== id);
+      await kvPut("projects", list);
+      await kvDel(`scene:${id}`);
+      if (activeProjectId === id) activeProjectId = null;
+      await pruneOrphanBlobs();
+      renderProjectsPanel();
+    }
+
+    // One-time migration: the old single-slot session (key "scene")
+    // becomes the first entry in the projects registry.
+    async function migrateLegacyScene() {
+      const legacy = await kvGet("scene");
+      if (!legacy) return;
+      const list = (await kvGet("projects")) ?? [];
+      const id = newSessionKey();
+      list.unshift({
+        id,
+        name: legacy.objects?.[0]?.name ?? "Untitled project",
+        updatedAt: legacy.savedAt ?? Date.now(),
+        objectCount: legacy.objects?.length ?? 0,
+      });
+      await kvPut(`scene:${id}`, legacy);
+      await kvPut("projects", list);
+      await kvDel("scene");
+    }
+
+    let sceneSaveTimer = null;
+    function scheduleSceneSave(delay = 800) {
+      if (sessionPaused) return;
+      clearTimeout(sceneSaveTimer);
+      sceneSaveTimer = setTimeout(saveSceneDoc, delay);
+    }
+    async function saveSceneDoc() {
+      if (sessionPaused) return;
+      const doc = {
+        v: 1,
+        savedAt: Date.now(),
+        camera: {
+          pos: camera.position.toArray(),
+          quat: camera.quaternion.toArray(),
+        },
+        flySpeed: FLY.speed,
+        selectedIndex: objects.findIndex((o) => o.id === selectedObjectId),
+        objects: objects
+          .filter((o) => o.splatMesh && o.fileKey)
+          .map((o) => ({
+            fileKey: o.fileKey,
+            name: o.name,
+            fileName: o.file?.name ?? null,
+            pos: o.splatMesh.position.toArray(),
+            quat: o.splatMesh.quaternion.toArray(),
+            scale: o.splatMesh.scale.toArray(),
+          })),
+        volumes: volumes
+          .filter((v) => v.sdfNode)
+          .map((v) => ({
+            type: v.type,
+            name: v.name,
+            pos: v.sdfNode.position.toArray(),
+            quat: v.sdfNode.quaternion.toArray(),
+            scale: v.sdfNode.scale.toArray(),
+            intensity: v.intensity,
+            softness: v.softness,
+            parentIndex: v.parentId != null
+              ? objects.findIndex((o) => o.id === v.parentId)
+              : -1,
+          })),
+      };
+      // An emptied scene drops its project entry rather than storing a husk.
+      if (doc.objects.length === 0) {
+        if (activeProjectId) {
+          const id = activeProjectId;
+          activeProjectId = null;
+          const list = ((await kvGet("projects")) ?? []).filter((p) => p.id !== id);
+          await kvPut("projects", list);
+          await kvDel(`scene:${id}`);
+          await pruneOrphanBlobs();
+          renderProjectsPanel();
+        }
+        return;
+      }
+      if (!activeProjectId) activeProjectId = newSessionKey();
+      await kvPut(`scene:${activeProjectId}`, doc);
+      const list = (await kvGet("projects")) ?? [];
+      const entry = {
+        id: activeProjectId,
+        name: doc.objects[0]?.name ?? "Untitled project",
+        updatedAt: Date.now(),
+        objectCount: doc.objects.length,
+      };
+      const i = list.findIndex((p) => p.id === activeProjectId);
+      if (i >= 0) {
+        entry.name = list[i].name || entry.name; // name is stable after creation
+        list[i] = entry;
+      } else {
+        list.unshift(entry);
+      }
+      list.sort((a, b) => b.updatedAt - a.updatedAt);
+      await kvPut("projects", list);
+      await pruneOrphanBlobs();
+    }
+
+    const maskSaveTimers = new Map();
+    function scheduleMaskSave(obj, delay = 2000) {
+      if (sessionPaused || !obj?.fileKey) return;
+      clearTimeout(maskSaveTimers.get(obj.fileKey));
+      maskSaveTimers.set(obj.fileKey, setTimeout(() => saveMaskNow(obj), delay));
+    }
+    async function saveMaskNow(obj) {
+      if (sessionPaused || !obj?.splatMesh || !obj.shadowMask || !obj.fileKey) return;
+      try {
+        const count = obj.splatMesh.packedSplats.numSplats;
+        if (!count) return;
+        // Copy the live mask GPU→GPU into a throwaway array and read THAT
+        // back. Reading the live mask directly would swap its texture to a
+        // CPU copy that uploads before the async readback fills it — the
+        // object would flash black for a frame or two on every autosave.
+        const maskDyno = obj.shadowMask.dyno;
+        const tmp = new RgbaArray();
+        tmp.render({
+          renderer, count,
+          reader: dyno.dynoBlock({ index: "int" }, { rgba8: "vec4" }, ({ index }) => ({
+            rgba8: readRgbaArray(maskDyno, index),
+          })),
+        });
+        const bytes = new Uint8Array(await tmp.read()); // copy out of the shared view
+        tmp.dispose();
+        // All-ones = no shadows painted; store nothing (drop stale saves).
+        const painted = bytes.some((b) => b !== 255);
+        if (painted) await kvPut(`mask:${obj.fileKey}`, { count, bytes });
+        else await kvDel(`mask:${obj.fileKey}`);
+      } catch (e) {
+        console.warn("Shadow mask autosave failed", e);
+      }
+    }
+
+    async function restoreSession(projectId) {
+      const doc = await kvGet(`scene:${projectId}`);
+      if (!doc || !Array.isArray(doc.objects) || doc.objects.length === 0) return;
+      // Autosaves from here on belong to this project.
+      activeProjectId = projectId;
+      sessionPaused = true;
+      try {
+        for (const rec of doc.objects) {
+          const stored = await kvGet(`file:${rec.fileKey}`);
+          if (!stored?.blob) continue;
+          const file = new File([stored.blob], stored.name || rec.fileName || "object.spz");
+          file.__sessionKey = rec.fileKey;
+          persistedFileKeys.add(rec.fileKey);
+          await addObjectFromFile(file);
+          const obj = objects[objects.length - 1];
+          if (!obj || obj.fileKey !== rec.fileKey || !obj.splatMesh) continue;
+          if (rec.name) obj.name = rec.name;
+          if (rec.pos)   obj.splatMesh.position.fromArray(rec.pos);
+          if (rec.quat)  obj.splatMesh.quaternion.fromArray(rec.quat);
+          if (rec.scale) obj.splatMesh.scale.fromArray(rec.scale);
+          obj.splatMesh.updateMatrixWorld(true);
+          const m = await kvGet(`mask:${rec.fileKey}`);
+          if (m?.bytes && m.count === obj.splatMesh.packedSplats.numSplats) {
+            obj.shadowMask.dispose();
+            obj.shadowMask = new RgbaArray({ array: m.bytes, count: m.count });
+            obj.splatMesh.worldModifier = shadowDyno(obj.shadowMask.dyno);
+            obj.splatMesh.updateGenerator();
+          }
+        }
+        for (const vr of doc.volumes ?? []) {
+          const v = addVolume(vr.type, { silent: true });
+          if (!v) continue;
+          if (vr.name) v.name = vr.name;
+          if (vr.pos)   v.sdfNode.position.fromArray(vr.pos);
+          if (vr.quat)  v.sdfNode.quaternion.fromArray(vr.quat);
+          if (vr.scale) v.sdfNode.scale.fromArray(vr.scale);
+          v.sdfNode.updateMatrixWorld(true);
+          if (typeof vr.intensity === "number") v.intensity = vr.intensity;
+          if (typeof vr.softness  === "number") v.softness  = vr.softness;
+          applyVolumeStyle(v);
+          const parent = vr.parentIndex >= 0 ? objects[vr.parentIndex] : null;
+          if (parent) setVolumeParent(v.id, parent.id);
+        }
+        renderObjectsPanel();
+        renderVolumesPanel();
+        if (doc.camera?.pos) {
+          camera.position.fromArray(doc.camera.pos);
+          camera.quaternion.fromArray(doc.camera.quat);
+          camera.updateMatrixWorld(true);
+        }
+        if (doc.flySpeed) {
+          setFlySpeed(doc.flySpeed);
+          flySpeedCtl?.updateDisplay();
+        }
+        if (doc.selectedIndex >= 0 && objects[doc.selectedIndex]) {
+          selectObject(objects[doc.selectedIndex].id);
+        } else {
+          selectObject(null);
+        }
+        // The restore replayed add/paint actions — none of them should be
+        // Cmd+Z-able (undoing into a half-restored state is confusing).
+        while (history.length) dropHistoryEntry(history.pop());
+        if (objects.length > 0) {
+          showOverlay(`Restored session · ${objects.length} object${objects.length === 1 ? "" : "s"}`);
+        }
+      } catch (e) {
+        console.warn("Session restore failed", e);
+      } finally {
+        sessionPaused = false;
+      }
+    }
+
+    // Camera moves constantly while flying — persist it on a slow timer
+    // (only when it actually changed) plus best-effort on tab close.
+    const _lastSavedCamPos  = new THREE.Vector3(Infinity, Infinity, Infinity);
+    const _lastSavedCamQuat = new THREE.Quaternion();
+    setInterval(() => {
+      if (sessionPaused || !hasObjects()) return;
+      if (camera.position.distanceToSquared(_lastSavedCamPos) < 1e-8 &&
+          Math.abs(camera.quaternion.dot(_lastSavedCamQuat)) > 0.9999999) return;
+      _lastSavedCamPos.copy(camera.position);
+      _lastSavedCamQuat.copy(camera.quaternion);
+      saveSceneDoc();
+    }, 10_000);
+    window.addEventListener("beforeunload", () => {
+      if (!sessionPaused && hasObjects()) saveSceneDoc();
+    });
 
     function getSelectedVolume() {
       return volumes.find((v) => v.id === selectedVolumeId) ?? null;
@@ -2102,10 +2710,12 @@
     //   • Spark finds the SDF via `edit.sdfs` regardless of where in the
     //     scene graph the SDF sits, so the darkening "just works"; the
     //     edit's OWN position in the graph decides which meshes it hits.
-    function addVolume(type) {
+    // opts.silent = true → programmatic creation (session restore): no
+    // selection change, no Cmd+Z entry, no toast. Returns the volume record.
+    function addVolume(type, opts = {}) {
       if (volumes.length >= MAX_VOLUMES) {
-        showOverlay(`Max ${MAX_VOLUMES} shadow volumes`);
-        return;
+        if (!opts.silent) showOverlay(`Max ${MAX_VOLUMES} shadow volumes`);
+        return null;
       }
 
       const helperRoot = makeVolumeHelper(type);
@@ -2167,8 +2777,15 @@
       mountVolumeEdit(v);    // darkening is always global (scene root)
       applyVolumeStyle(v);
       styleVolumeHelper(v);
-      selectVolume(id);
-      showOverlay(`Added shadow ${type}`);
+      if (!opts.silent) {
+        selectVolume(id);
+        pushHistory({ kind: "addVolume", volumeId: id, label: `add ${name}` });
+        scheduleSceneSave();
+        showOverlay(`Added shadow ${type}`);
+      } else {
+        renderVolumesPanel();
+      }
+      return v;
     }
 
     // "Parent" a volume to a splat object — LOGICALLY, not in the scene
@@ -2216,6 +2833,7 @@
       // The darkening itself always stays global (scene root) — a
       // parented volume still shadows the ground/other objects under it.
       mountVolumeEdit(v);
+      scheduleSceneSave();
     }
 
     // Per-frame volume sync, called from the render loop:
@@ -2279,6 +2897,8 @@
         if (node.material) node.material.dispose();
       });
       volumes.splice(idx, 1);
+      purgeHistoryFor("volume", id);
+      scheduleSceneSave();
       if (selectedVolumeId === id) selectedVolumeId = null;
       renderVolumesPanel();
       // Trigger a gizmo refresh in case the splat selection should now
@@ -2504,6 +3124,9 @@
       // "click an asset to paint shadows on it" behavior in the UI.
       const obj = getSelected();
       if (!obj || !obj.splatMesh || !obj.shadowMask) return;
+      // The brush anchors to the splat surface under the pointer; with no
+      // surface hit there is nothing to paint.
+      if (brushHitDist === null) return;
 
       // Convert the world-space brush ray (set by updateBrushRay) into
       // the mesh's OBJECT space. The bake reads splat centers from
@@ -2516,7 +3139,14 @@
       _bakeInvRot3.setFromMatrix4(_bakeInvMat4);
 
       _bakeOrigin.copy(PARAMETERS.brushOrigin.value).applyMatrix4(_bakeInvMat4);
-      _bakeDir   .copy(PARAMETERS.brushDirection.value).applyMatrix3(_bakeInvRot3).normalize();
+      _bakeDir   .copy(PARAMETERS.brushDirection.value).applyMatrix3(_bakeInvRot3);
+      // Length of the inverse-transformed unit ray = object units per
+      // world unit. Scaling radius/depth by it makes the Size and Depth
+      // sliders TRUE world units on every object, no matter how the gizmo
+      // scaled it (before, a 5x-scaled object painted a 5x-bigger brush
+      // than the slider and cursor implied).
+      const objPerWorld = _bakeDir.length() || 1;
+      _bakeDir.normalize();
       _bakeRight .copy(PARAMETERS.brushRight.value).applyMatrix3(_bakeInvRot3).normalize();
       _bakeUp    .copy(PARAMETERS.brushUp.value).applyMatrix3(_bakeInvRot3).normalize();
 
@@ -2524,6 +3154,10 @@
       PARAMETERS.brushDirection.value.copy(_bakeDir);
       PARAMETERS.brushRight.value.copy(_bakeRight);
       PARAMETERS.brushUp.value.copy(_bakeUp);
+      const savedRadius = PARAMETERS.brushRadius.value;
+      const savedDepth  = PARAMETERS.brushDepth.value;
+      PARAMETERS.brushRadius.value = savedRadius * objPerWorld;
+      PARAMETERS.brushDepth.value  = savedDepth  * objPerWorld;
 
       const oldMask = obj.shadowMask;
       const newMask = new RgbaArray();
@@ -2535,7 +3169,26 @@
           oldMask.dyno,
         ),
       });
-      oldMask.dispose();
+      // Radius/depth are user-facing slider values — restore them (origin
+      // and direction get rewritten by the next updateBrushRay anyway).
+      PARAMETERS.brushRadius.value = savedRadius;
+      PARAMETERS.brushDepth.value  = savedDepth;
+      // On the FIRST stamp of a stroke, keep the pre-stroke mask alive as a
+      // Cmd+Z snapshot instead of disposing it. Intermediate masks within
+      // the same stroke are still freed as before.
+      if (strokeNeedsSnapshot) {
+        strokeNeedsSnapshot = false;
+        pushHistory({
+          kind: "mask",
+          objId: obj.id,
+          mask: oldMask,
+          label: PARAMETERS.undoEnabled.value
+            ? `erase stroke on ${obj.name}`
+            : `shadow stroke on ${obj.name}`,
+        });
+      } else {
+        oldMask.dispose();
+      }
       obj.shadowMask = newMask;
       // Re-bind the worldModifier to the new mask's dyno texture and
       // rebuild the generator so the renderer picks it up.
@@ -2547,6 +3200,103 @@
     const _brushRight = new THREE.Vector3();
     const _brushUp    = new THREE.Vector3();
 
+    // ---- visible brush cursor ------------------------------------------
+    // A ring (circle brush) or square outline pinned to the splat surface
+    // under the pointer, sized to the exact radius the bake will paint.
+    const brushCursor = new THREE.Group();
+    brushCursor.visible = false;
+    {
+      // Photoshop-style outline: a bright line over a slightly larger dark
+      // backing line, so the cursor reads on ANY background (a single thin
+      // amber line disappeared against bright sand).
+      const lightMat = new THREE.LineBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 1.0, depthTest: false,
+      });
+      const darkMat = new THREE.LineBasicMaterial({
+        color: 0x101010, transparent: true, opacity: 0.9, depthTest: false,
+      });
+      const circPts = [];
+      for (let i = 0; i < 64; i++) {
+        const a = (i / 64) * Math.PI * 2;
+        circPts.push(new THREE.Vector3(Math.cos(a), Math.sin(a), 0));
+      }
+      const circGeo = new THREE.BufferGeometry().setFromPoints(circPts);
+      const sqGeo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(-1, -1, 0), new THREE.Vector3(1, -1, 0),
+        new THREE.Vector3(1, 1, 0),   new THREE.Vector3(-1, 1, 0),
+      ]);
+      const circleLine = new THREE.LineLoop(circGeo, lightMat);
+      const circleBack = new THREE.LineLoop(circGeo, darkMat);
+      const squareLine = new THREE.LineLoop(sqGeo, lightMat);
+      const squareBack = new THREE.LineLoop(sqGeo, darkMat);
+      circleBack.scale.setScalar(1.035);
+      squareBack.scale.setScalar(1.035);
+      // Center dot (dark halo + bright core) for precise placement.
+      const dotBack = new THREE.Mesh(
+        new THREE.SphereGeometry(0.05, 8, 8),
+        new THREE.MeshBasicMaterial({ color: 0x101010, depthTest: false }));
+      const dot = new THREE.Mesh(
+        new THREE.SphereGeometry(0.032, 8, 8),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false }));
+      circleBack.renderOrder = squareBack.renderOrder = dotBack.renderOrder = 998;
+      circleLine.renderOrder = squareLine.renderOrder = dot.renderOrder = 999;
+      brushCursor.add(circleBack, circleLine, squareBack, squareLine, dotBack, dot);
+      brushCursor.userData = {
+        circleLine, circleBack, squareLine, squareBack,
+        lightMat, dotMat: dot.material,
+      };
+      scene.add(brushCursor);
+    }
+    const _cursorBasis = new THREE.Matrix4();
+    function updateBrushCursor(dist) {
+      if (dist === null || !inPaintMode() || showcase.active) {
+        brushCursor.visible = false;
+        return;
+      }
+      const { circleLine, circleBack, squareLine, squareBack, lightMat, dotMat } =
+        brushCursor.userData;
+      const isSquare = PARAMETERS.brushSquare.value;
+      circleLine.visible = circleBack.visible = !isSquare;
+      squareLine.visible = squareBack.visible = isSquare;
+      // White for shadow, cool blue for erase (both over the dark backing).
+      const col = PARAMETERS.undoEnabled.value ? 0x9ad1ff : 0xffffff;
+      lightMat.color.setHex(col);
+      dotMat.color.setHex(col);
+      brushCursor.position
+        .copy(raycaster.ray.origin)
+        .addScaledVector(PARAMETERS.brushDirection.value, dist);
+      _cursorBasis.makeBasis(
+        PARAMETERS.brushRight.value,
+        PARAMETERS.brushUp.value,
+        PARAMETERS.brushDirection.value,
+      );
+      brushCursor.quaternion.setFromRotationMatrix(_cursorBasis);
+      // Never let the outline collapse below ~9px radius on screen — a
+      // sub-pixel ring is an invisible cursor (the true brush is that tiny
+      // anyway, so the exaggeration is honest enough to stay useful).
+      const worldPerPx =
+        (2 * dist * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2)) /
+        renderer.domElement.clientHeight;
+      brushCursor.scale.setScalar(
+        Math.max(PARAMETERS.brushRadius.value, worldPerPx * 9),
+      );
+      brushCursor.visible = true;
+    }
+
+    // World-space distance along the current pointer ray to the splat
+    // surface the brush is anchored on, or null when the pointer isn't
+    // over the selected object. Set by updateBrushRay each move; the bake
+    // refuses to paint when it's null.
+    let brushHitDist = null;
+    const _splatHits = [];
+    // Raycasting a multi-million-splat mesh can cost >100ms, so it's
+    // throttled adaptively: re-raycast at most every 3x its own measured
+    // cost, sliding the cursor/anchor along the ray at the cached surface
+    // distance in between.
+    let _rayMesh = null;
+    let _rayLastTime = 0;
+    let _rayLastCost = 0;
+
     function updateBrushRay(event) {
       const rect = renderer.domElement.getBoundingClientRect();
       const ndc = new THREE.Vector2(
@@ -2556,7 +3306,50 @@
       raycaster.setFromCamera(ndc, camera);
       const dir = raycaster.ray.direction.clone().normalize();
       PARAMETERS.brushDirection.value.set(dir.x, dir.y, dir.z);
-      PARAMETERS.brushOrigin.value.copy(raycaster.ray.origin);
+
+      // Anchor the brush on the splat surface under the pointer: Depth is
+      // measured from the surface INTO the object, not from the camera
+      // (camera-relative depth silently cut strokes short whenever the
+      // camera stood farther away than the Depth value).
+      const mesh = getSelectedMesh();
+      let dist = null;
+      if (mesh !== _rayMesh) {
+        // Selection changed — the cached surface distance belongs to the
+        // previous mesh.
+        _rayMesh = mesh;
+        brushHitDist = null;
+        _rayLastTime = 0;
+        _rayLastCost = 0;
+      }
+      if (mesh && inPaintMode()) {
+        const now = performance.now();
+        if (now - _rayLastTime >= Math.max(30, _rayLastCost * 3)) {
+          _splatHits.length = 0;
+          try { mesh.raycast(raycaster, _splatHits); } catch (_) { /* ignore */ }
+          _rayLastCost = performance.now() - now;
+          _rayLastTime = now;
+          // Spark's splat raycast does not sort its hits — take the nearest.
+          for (const h of _splatHits) {
+            if (dist === null || h.distance < dist) dist = h.distance;
+          }
+          // Mid-stroke the pointer can slip off the object's silhouette for
+          // a few events — keep the stroke alive at the last known depth.
+          if (dist === null && isDragging) dist = brushHitDist;
+        } else {
+          dist = brushHitDist;
+        }
+      }
+      brushHitDist = dist;
+
+      if (dist !== null) {
+        // Pull the origin back by one radius so surface splats right at
+        // the hit point land inside the along>0 gate.
+        PARAMETERS.brushOrigin.value
+          .copy(raycaster.ray.origin)
+          .addScaledVector(dir, Math.max(0, dist - PARAMETERS.brushRadius.value));
+      } else {
+        PARAMETERS.brushOrigin.value.copy(raycaster.ray.origin);
+      }
 
       // Build a screen-aligned basis perpendicular to the ray, so the square
       // brush has its edges aligned with screen X/Y like users expect.
@@ -2567,6 +3360,8 @@
       _brushUp.crossVectors(_brushRight, dir).normalize();
       PARAMETERS.brushRight.value.copy(_brushRight);
       PARAMETERS.brushUp.value.copy(_brushUp);
+
+      updateBrushCursor(dist);
     }
 
     // Pointer routing strategy:
@@ -2591,7 +3386,12 @@
     let downX = 0, downY = 0, downMoved = false;
     const CLICK_PX = 5; // px threshold for "still a click" vs. "drag"
 
+    // Set on paint-stroke start (pointerdown); consumed by the first
+    // bakeCurrentRgba of the stroke to snapshot the mask for Cmd+Z.
+    let strokeNeedsSnapshot = false;
+
     renderer.domElement.addEventListener("pointermove", (event) => {
+      if (showcase.active) return; // input paused during showcase recording
       // Track movement even when no splat is selected — we still want
       // click-vs-drag heuristics for the selection raycast below.
       if (event.buttons & 1) {
@@ -2599,8 +3399,8 @@
         const dy = event.clientY - downY;
         if (dx * dx + dy * dy > CLICK_PX * CLICK_PX) downMoved = true;
       }
-      if (gizmoDragging) return;
-      if (!getSelectedMesh()) return;
+      if (gizmoDragging) { brushCursor.visible = false; return; }
+      if (!getSelectedMesh()) { brushCursor.visible = false; return; }
       updateBrushRay(event);
       if (isDragging && inPaintMode()) {
         // Only deposit a new stamp when the cursor has moved far enough
@@ -2615,6 +3415,7 @@
     }, { capture: true });
 
     renderer.domElement.addEventListener("pointerdown", (event) => {
+      if (showcase.active) return; // input paused during showcase recording
       // Drop focus from any lil-gui number input so subsequent WASD keys
       // aren't silently swallowed by the input. FpsMovement listens at
       // the document level but inputs can still consume the relevant
@@ -2649,12 +3450,17 @@
       const isPrimary = event.button === 0;
       if (!isPaintModeAllowed(event) || !isPrimary || !inPaintMode()) return;
       isDragging = true;
+      strokeNeedsSnapshot = true; // new stroke → snapshot mask for Cmd+Z
       updateBrushRay(event);
       // Drop a single stamp on click and seed the throttler from this spot.
       resetStampTracking(event);
       bakeCurrentRgba();
       event.stopImmediatePropagation();
     }, { capture: true });
+
+    renderer.domElement.addEventListener("pointerleave", () => {
+      brushCursor.visible = false;
+    });
 
     function isPaintModeAllowed(event) {
       // Touch is handled by Spark as rotate by default; we still let touch
@@ -2719,6 +3525,8 @@
     }
 
     renderer.domElement.addEventListener("pointerup", (event) => {
+      // A finished paint stroke → autosave the (debounced) shadow mask.
+      if (isDragging && inPaintMode()) scheduleMaskSave(getSelected());
       isDragging = false;
       if (event.button !== 0) return;
       // Don't treat a gizmo / brush drag as a "click" on something.
@@ -2738,6 +3546,223 @@
     const endDrag = () => { isDragging = false; };
     renderer.domElement.addEventListener("pointercancel", endDrag, { capture: true });
     renderer.domElement.addEventListener("pointerleave", endDrag);
+
+    // -----------------------------------------------------------------------
+    // Showcase recorder — a scripted 7 s "bumper" clip of the current scene
+    // -----------------------------------------------------------------------
+    // Hides every bit of UI, plays a cinematic move (slow orbital pull-in
+    // around the selected object while the object itself gently lifts,
+    // drifts sideways and settles back — its parented shadow volumes track
+    // it live, which is the whole demo), records the WebGL canvas with
+    // MediaRecorder, then downloads the clip and restores the scene and
+    // camera exactly as they were. Frame the shot you want first: the
+    // animation starts from the current camera view.
+    const showcase = { active: false, tick: null, requestFinish: null };
+
+    // World-space visual center + radius of a splat object (percentile
+    // bounds so stray outlier splats don't blow the estimate up).
+    function worldBoundsOf(mesh) {
+      mesh.updateWorldMatrix(true, false);
+      const box = robustBoundsFromSplats(mesh.packedSplats)
+        ?? mesh.getBoundingBox?.(true);
+      if (!box || !isFinite(box.min.x) || !isFinite(box.max.x)) return null;
+      const center = box.getCenter(new THREE.Vector3()).applyMatrix4(mesh.matrixWorld);
+      const size = box.getSize(new THREE.Vector3());
+      const meshScale = (mesh.scale.x + mesh.scale.y + mesh.scale.z) / 3;
+      const radius = Math.max(size.x, size.y, size.z, 0.02) * 0.5 * meshScale;
+      return { center, radius };
+    }
+
+    function recordShowcase(useDefaultCodec = false) {
+      if (showcase.active) return;
+      const candidates = objects
+        .filter((o) => o.splatMesh)
+        .map((o) => ({ o, b: worldBoundsOf(o.splatMesh) }))
+        .filter((c) => c.b);
+      if (candidates.length === 0) {
+        showOverlay("Load an object first");
+        return;
+      }
+
+      // Pick the "hero" — the prop the clip revolves around. Prefer the
+      // selected object, but never animate the environment itself: in a
+      // multi-object scene the world capture dwarfs the props, so if the
+      // selection IS the big world (or nothing is selected) fall back to
+      // the smallest object (the car / prop).
+      const largestR  = Math.max(...candidates.map((c) => c.b.radius));
+      const smallest  = candidates.reduce((a, c) => (c.b.radius < a.b.radius ? c : a));
+      const selectedC = candidates.find((c) => c.o === getSelected());
+      const hero = (selectedC && selectedC.b.radius < largestR * 0.45)
+        ? selectedC
+        : smallest;
+      // Only float the hero when it's clearly a prop within a bigger scene;
+      // a lone world capture gets a camera-only move (terrain shouldn't bob).
+      const animateHero =
+        candidates.length > 1 && hero.b.radius < largestR * 0.45;
+
+      const mesh = hero.o.splatMesh;
+      const target = hero.b.center.clone();
+      const heroRadius = hero.b.radius;
+
+      // Everything we must put back afterwards.
+      const savedCamPos  = camera.position.clone();
+      const savedCamQuat = camera.quaternion.clone();
+      const savedPos     = mesh.position.clone();
+      const savedQuat    = mesh.quaternion.clone();
+      const savedHelperVis = volumes.map((v) => [v, v.helperRoot?.visible ?? false]);
+
+      // Clean stage: no panels, no gizmo, no volume wireframes, no brush cursor.
+      document.body.classList.add("recording");
+      transformControls.detach();
+      transformHelper.visible = false;
+      brushCursor.visible = false;
+      for (const [v] of savedHelperVis) if (v.helperRoot) v.helperRoot.visible = false;
+
+      const restoreStage = () => {
+        document.body.classList.remove("recording");
+        mesh.position.copy(savedPos);
+        mesh.quaternion.copy(savedQuat);
+        mesh.updateMatrixWorld(true);
+        camera.position.copy(savedCamPos);
+        camera.quaternion.copy(savedCamQuat);
+        for (const [v, vis] of savedHelperVis) if (v.helperRoot) v.helperRoot.visible = vis;
+        syncSelectionState(); // re-attach the gizmo per current selection
+      };
+
+      // Recorder — prefer H.264 MP4 when the browser can mux it (drops
+      // straight into editors/social), fall back to WebM. avc3 goes first:
+      // it carries codec parameters in-band, so it survives the resolution
+      // changes that make avc1 recordings silently produce ZERO bytes
+      // (Chrome logs a warning suggesting exactly this switch).
+      const mime = useDefaultCodec ? undefined : [
+        "video/mp4;codecs=avc3.640028",
+        "video/mp4;codecs=avc1.640028",
+        "video/mp4",
+        "video/webm;codecs=vp9",
+        "video/webm",
+      ].find((m) => window.MediaRecorder?.isTypeSupported?.(m));
+      const stream = renderer.domElement.captureStream(60);
+      let rec;
+      try {
+        rec = new MediaRecorder(stream, {
+          ...(mime ? { mimeType: mime } : {}),
+          videoBitsPerSecond: 24_000_000,
+        });
+      } catch (err) {
+        restoreStage();
+        alert(`This browser can't record the canvas: ${err.message ?? err}`);
+        return;
+      }
+      const chunks = [];
+      let recError = null;
+      rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+      const recStopped = new Promise((res) => { rec.onstop = res; });
+
+      // Camera path baseline — starts from the user's current composition.
+      const sph0 = new THREE.Spherical().setFromVector3(
+        camera.position.clone().sub(target),
+      );
+      // Screen-right at the start, flattened to the ground plane: the drift
+      // direction that reads as sideways motion from the initial framing.
+      const driftDir = new THREE.Vector3()
+        .setFromMatrixColumn(camera.matrixWorld, 0);
+      driftDir.y = 0;
+      if (driftDir.lengthSq() < 1e-6) driftDir.set(1, 0, 0);
+      driftDir.normalize();
+
+      const DURATION_MS = 7000;
+      const easeInOut = (x) => x * x * (3 - 2 * x);
+      const UP = new THREE.Vector3(0, 1, 0);
+      const _sph  = new THREE.Spherical();
+      const _yawQ = new THREE.Quaternion();
+      const _pivot = new THREE.Vector3();
+      let t0 = null;
+      let finished = false;
+
+      const finish = async () => {
+        if (finished) return;
+        finished = true;
+        showcase.active = false;
+        showcase.tick = null;
+        showcase.requestFinish = null;
+        rec.stop();
+        await recStopped;
+        restoreStage();
+        const actualMime = rec.mimeType || mime || "video/webm";
+        const blob = new Blob(chunks, { type: actualMime.split(";")[0] });
+        // A 0-byte blob means the encoder silently failed (seen with avc1 on
+        // some setups). Never download an unplayable empty file — retry once
+        // letting the browser pick its own default codec, then give up loud.
+        if (blob.size === 0) {
+          if (!useDefaultCodec) {
+            showOverlay("Encoder produced no data — retrying with default codec…");
+            setTimeout(() => recordShowcase(true), 300);
+            return;
+          }
+          alert(
+            "Recording failed: the browser's video encoder produced no data" +
+            (recError ? ` (${recError.name ?? recError})` : "") +
+            ". Try again in Chrome, or shrink the browser window and retry.",
+          );
+          return;
+        }
+        const ext = actualMime.includes("mp4") ? "mp4" : "webm";
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `${ioOptions.filename || "shadow-scene"}-showcase.${ext}`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+        showOverlay("Showcase video saved");
+      };
+      showcase.requestFinish = finish;
+
+      showcase.tick = (now) => {
+        if (t0 === null) t0 = now;
+        const t = Math.min(1, (now - t0) / DURATION_MS);
+        const s = easeInOut(t);
+        const env  = Math.sin(Math.PI * t);      // 0 → 1 → 0 (lift & settle)
+        const wave = Math.sin(2 * Math.PI * t);  // 0 at both ends (drift out & back)
+
+        // Camera: slow orbit with a gentle pull-in and a slight rise.
+        _sph.radius = sph0.radius * (1 - 0.18 * s);
+        _sph.theta  = sph0.theta + 0.55 * s;
+        _sph.phi    = Math.max(0.25, Math.min(Math.PI - 0.25, sph0.phi - 0.10 * s));
+        camera.position.setFromSpherical(_sph).add(target);
+        camera.lookAt(target);
+
+        // Hero object: hover-lift + sideways drift, yawing around its own
+        // visual center (not its file origin) so the pivot looks natural.
+        if (animateHero) {
+          _pivot.copy(savedPos)
+            .addScaledVector(UP, env * heroRadius * 0.22)
+            .addScaledVector(driftDir, wave * heroRadius * 0.25);
+          _yawQ.setFromAxisAngle(UP, wave * env * 0.18);
+          _pivot.sub(target).applyQuaternion(_yawQ).add(target);
+          mesh.position.copy(_pivot);
+          mesh.quaternion.copy(savedQuat).premultiply(_yawQ);
+          mesh.updateMatrixWorld(true);
+        }
+
+        if (t >= 1) finish();
+      };
+
+      // Surface encoder failures instead of silently recording nothing;
+      // finish() will fall back to the default codec if no data arrived.
+      rec.onerror = (e) => {
+        recError = e.error ?? e;
+        console.error("showcase recorder error:", recError);
+        finish();
+      };
+
+      showOverlay("Recording 7s showcase…");
+      // Two frames for the DOM to hide the panels before frames hit tape.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        // 500 ms timeslice: chunks stream in during recording, so a hiccup
+        // at stop time can't wipe the whole take.
+        rec.start(500);
+        showcase.active = true;
+      }));
+    }
 
     // -----------------------------------------------------------------------
     // GUI
@@ -2787,6 +3812,10 @@
     const reloadAllObjects = async (toastLabel) => {
       if (!hasObjects()) return;
       showOverlay(toastLabel);
+      // Suspend session autosave for the whole rebuild — the transient
+      // empty scene mid-reload must not overwrite (or prune) the stored
+      // session. One save at the end captures the final state.
+      sessionPaused = true;
       const previouslySelected = selectedObjectId;
       // Snapshot each object's gizmo transform too — reloaded meshes come
       // back at their file-native pose, and volume re-parenting below only
@@ -2841,6 +3870,8 @@
       if (matchIdx >= 0 && objects[matchIdx]) {
         selectObject(objects[matchIdx].id);
       }
+      sessionPaused = false;
+      scheduleSceneSave();
     };
     sceneFolder
       .add(LOD, "enabled")
@@ -2917,12 +3948,19 @@
         if (!obj || !obj.splatMesh || !obj.shadowMask) return;
         // Reset the SELECTED object's shadow mask to all (1,1,1,1) —
         // splatRgba (the immutable base color) doesn't need to change.
-        // Other objects are not affected.
+        // Other objects are not affected. The old mask becomes a Cmd+Z
+        // snapshot so an accidental reset can be undone.
         const fresh = makeAllOnesRgbaArray(obj.splatMesh.packedSplats.numSplats);
-        obj.shadowMask.dispose();
+        pushHistory({
+          kind: "mask",
+          objId: obj.id,
+          mask: obj.shadowMask,
+          label: `reset shadows on ${obj.name}`,
+        });
         obj.shadowMask = fresh;
         obj.splatMesh.worldModifier = shadowDyno(obj.shadowMask.dyno);
         obj.splatMesh.updateGenerator();
+        scheduleMaskSave(obj);
         showOverlay(`Reset · ${obj.name}`);
       },
       loadSplat: pickSplatFile,
@@ -3156,6 +4194,16 @@
     var filenameCtl = ioFolder.add(ioOptions, "filename").name("Filename");
     ioFolder.add(ioOptions, "fractionalBits", 8, 16, 1).name("SPZ precision");
     const saveCtl = ioFolder.add(ioOptions, "saveSpz").name("Save shadowed SPZ");
+    // Cinematic 7-second clip of the current scene — frame your shot first,
+    // then click. Esc ends the take early.
+    ioOptions.recordShowcase = () => recordShowcase();
+    const recordCtl = ioFolder
+      .add(ioOptions, "recordShowcase")
+      .name("Record 7s showcase video");
+    recordCtl.domElement.title =
+      "Hides the UI, plays a smooth orbit while the selected object " +
+      "gently floats (its shadow follows!), and downloads a video clip. " +
+      "Esc stops early.";
     saveCtl.domElement.classList.add("primary-action");
     ioFolder.open();
 
@@ -3202,10 +4250,12 @@
       if (controls.fpsMovement) controls.fpsMovement.enable = true;
       if (!gizmoDragging) setOrbitEnabled(true);
       canvas.classList.toggle("painting", mode !== "view");
+      // Cursor re-appears on the next pointer move if still in a brush mode.
+      brushCursor.visible = false;
       modeButtons.forEach((btn) =>
         btn.classList.toggle("active", btn.dataset.mode === mode),
       );
-      const labels = { shadow: "Shadow Mode", undo: "Undo Mode", view: "Orbit Mode" };
+      const labels = { shadow: "Shadow Mode", undo: "Eraser Mode", view: "Orbit Mode" };
       showOverlay(labels[mode]);
     }
     function refreshBrushAvailability() {
@@ -3254,6 +4304,14 @@
 
     window.addEventListener("keydown", (event) => {
       if (event.target instanceof HTMLInputElement) return;
+      // Cmd+Z (macOS) / Ctrl+Z — undo the last brush stroke, gizmo drag,
+      // shadow reset, or added volume.
+      if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey
+          && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        undoLast();
+        return;
+      }
       // Gizmo mode hotkeys (Blender-style). Only fire when an asset is
       // selected — otherwise the keys are no-ops and forward to flycam.
       if (getSelected() && !event.metaKey && !event.ctrlKey && !event.altKey) {
@@ -3266,7 +4324,12 @@
       switch (event.key) {
         case "1": setMode("shadow"); break;
         case "2": setMode("undo");   break;
-        case "Escape": setMode("view"); break;
+        case "Escape":
+          // During a showcase recording, Escape ends the take early (the
+          // clip recorded so far still downloads).
+          if (showcase.active) { showcase.requestFinish?.(); break; }
+          setMode("view");
+          break;
         case "=": case "+": {
           PARAMETERS.brushRadius.value = Math.min(
             PARAMETERS.brushRadius.value + 0.01, MAX_BRUSH_RADIUS,
@@ -3303,11 +4366,20 @@
     // -----------------------------------------------------------------------
     let lastFlyTime = performance.now();
     renderer.setAnimationLoop(() => {
+      const now = performance.now();
+      if (showcase.active) {
+        // Scripted showcase clip owns the camera and hero object; user
+        // input is paused so a stray key/drag can't ruin the take.
+        showcase.tick?.(now);
+        lastFlyTime = now;
+        syncVolumes();
+        renderer.render(scene, camera);
+        return;
+      }
       controls.update(camera);
       // World-vertical fly on Q (down) / E (up). Reuses Spark's document-
       // level key tracking (incl. window-blur clearing) and its Shift/Ctrl
       // speed multipliers so vertical speed matches WASD.
-      const now = performance.now();
       const dt = Math.min(0.1, (now - lastFlyTime) / 1000);
       lastFlyTime = now;
       const kc = controls.fpsMovement.keycode;
@@ -3323,6 +4395,24 @@
       syncVolumes();
       renderer.render(scene, camera);
     });
+
+    // Debug/testing handle — lets automated tests (and console debugging)
+    // inspect app state without going through the UI. Not a public API.
+    window.__shadowTool = {
+      objects, volumes, PARAMETERS, camera,
+      getSelected, selectObject, setMode, bakeCurrentRgba,
+      history, undoLast, pushHistory,
+      showcase, recordShowcase,
+      saveMaskNow, saveSceneDoc, setVolumeParent, addVolume,
+      THREE, scene, robustBoundsFromSplats, applyVolumeStyle,
+    };
+
+    // Saved projects are OFFERED on the start screen rather than restored
+    // automatically — opening the app always begins at "Cast a Shadow".
+    window.__shadowTool.sessionRestored = (async () => {
+      await migrateLegacyScene().catch(() => {});
+      await renderProjectsPanel().catch(() => {});
+    })();
   </script>
 </body>
 </html>
