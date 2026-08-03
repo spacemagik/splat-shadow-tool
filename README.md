@@ -182,7 +182,7 @@ The GUI also exposes:
 - **Shadow strength** — full-stroke target darkness (`0` = no effect, `0.5` = aggressive). Pure per-channel darken, so hue & saturation are preserved.
 - **Flow (per-stamp)** — how much of the strength each individual stamp deposits (low = airbrush-style gradual buildup, high = heavy stamp). Combined with cursor-distance throttling, this stops slow drags from piling up dark blobs in one spot.
 - **Edge softness** — `0` = sharp brush boundary, `1` = full smooth falloff from center to edge. Soft edges naturally build penumbra over multiple strokes because edge splats are darkened less per pass.
-- **Cool tint (skylight)** — `0` keeps the shadow neutrally darker; higher values shift the shadow slightly cool/blue like real ambient skylight in shadow areas.
+- **Tint (warm ↔ cool)** — `0` keeps the shadow neutrally darker; positive values shift it cool/blue like ambient skylight, negative values shift it warm/amber to match golden-hour or firelit environments.
 - **Reset shadows on selection** — clears the selected object's shadow mask
   back to identity. Other objects are unaffected.
 - **Add object** — load another `.spz` / `.ply` / `.splat` / `.ksplat` into the scene.

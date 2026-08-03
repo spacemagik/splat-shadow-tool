@@ -1164,8 +1164,9 @@
       // hard stamp on every event. Combined with distance-based throttling
       // in JS, this gives a smooth, paintable feel.
       flow:            dyno.dynoFloat(0.18),
-      // Cool tint (0..1) — at 0 the shadow is neutral; at 1 it picks up a
-      // subtle blue cast like real shadows lit by ambient skylight.
+      // Tint temperature (-1..1) — 0 is a neutral darken; positive shifts
+      // the shadow cool/blue like ambient skylight, negative shifts it
+      // warm/amber like shadows in golden-hour or firelit environments.
       coolTint:        dyno.dynoFloat(0.0),
       // Edge softness (0..1) — 0 = sharp brush boundary, 1 = full smooth
       // falloff from brush center to edge. The shader smoothsteps from 0
@@ -1453,7 +1454,10 @@
     // Inside the brush we multiply the mask down (shadow) or push it back
     // toward 1 (undo). Outside the brush the mask is passed through.
     function shadowMaskBakeDyno(packedSplatsDyno, currentMaskDyno) {
-      const coolMul = dyno.dynoVec3(new THREE.Vector3(0.82, 0.92, 1.05));
+      const coolMul = dyno.dynoVec3(new THREE.Vector3(0.72, 0.88, 1.08));
+      // Warm counterpart: red survives, blue drops — shadows tinted like
+      // ambient bounce light in a warm scene.
+      const warmMul = dyno.dynoVec3(new THREE.Vector3(1.04, 0.82, 0.58));
       const oneVec3 = dyno.dynoVec3(new THREE.Vector3(1.0, 1.0, 1.0));
       const oneVec4 = dyno.dynoVec4(new THREE.Vector4(1.0, 1.0, 1.0, 1.0));
       const ZERO    = dyno.dynoFloat(0.0);
@@ -1502,13 +1506,18 @@
           const brushWeight = dyno.mul(radialWeight, depthMask);
 
           // ---- per-channel shadow multiplier ----------------------------
-          //  tintVec is (1,1,1) when coolTint=0 (no hue shift, uniform
-          //  darken — this is the case where mask channels stay equal and
-          //  quantization can't introduce a tint). Cool tint diverges them
-          //  intentionally toward (0.82, 0.92, 1.05).
+          //  tintVec is (1,1,1) when the tint slider sits at 0 (no hue
+          //  shift, uniform darken — mask channels stay equal so
+          //  quantization can't introduce a tint). Positive values diverge
+          //  the channels toward cool skylight blue, negative toward warm
+          //  golden-hour amber, letting painted shadows match the scene's
+          //  ambient light instead of always being neutral black.
+          const target = dyno.select(
+            dyno.greaterThan(PARAMETERS.coolTint, ZERO), coolMul, warmMul,
+          );
           const tintVec = dyno.add(
             oneVec3,
-            dyno.mul(dyno.sub(coolMul, oneVec3), PARAMETERS.coolTint),
+            dyno.mul(dyno.sub(target, oneVec3), dyno.abs(PARAMETERS.coolTint)),
           );
           const channelMul3 = dyno.mul(tintVec, PARAMETERS.darkness);
           // Pad to vec4 with alpha=1 so multiplying the mask doesn't
@@ -3925,8 +3934,8 @@
       .add(PARAMETERS.edgeSoftness, "value", 0.0, 1.0, 0.01)
       .name("Edge softness");
     shadowFolder
-      .add(PARAMETERS.coolTint, "value", 0.0, 1.0, 0.01)
-      .name("Cool tint (skylight)");
+      .add(PARAMETERS.coolTint, "value", -1.0, 1.0, 0.01)
+      .name("Tint (warm ↔ cool)");
     shadowFolder.open();
 
     // ---- Shadow volumes folder ------------------------------------------
