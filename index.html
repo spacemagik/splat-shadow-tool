@@ -1143,7 +1143,9 @@
       undoEnabled:     dyno.dynoBool(false),
       // false = circle (cylinder), true = square (rectangular prism)
       brushSquare:     dyno.dynoBool(false),
-      brushRadius:     dyno.dynoFloat(0.08),
+      // World units. 0.08 (8 cm) painted a near-invisible sliver on
+      // room/terrain-scale captures — 0.3 reads clearly on first stroke.
+      brushRadius:     dyno.dynoFloat(0.3),
       brushDepth:      dyno.dynoFloat(10.0),
       brushOrigin:     dyno.dynoVec3(new THREE.Vector3(0, 0, 0)),
       brushDirection:  dyno.dynoVec3(new THREE.Vector3(0, 0, -1)),
@@ -2411,7 +2413,21 @@
           const m = await kvGet(`mask:${rec.fileKey}`);
           if (m?.bytes && m.count === obj.splatMesh.packedSplats.numSplats) {
             obj.shadowMask.dispose();
-            obj.shadowMask = new RgbaArray({ array: m.bytes, count: m.count });
+            // Don't use RgbaArray({ array }) here: for splat counts that
+            // span multiple texture layers its constructor pads the
+            // backing array to a multiple of the texture WIDTH only,
+            // while the DataArrayTexture allocates width*height*depth
+            // texels — texSubImage3D rejects the short upload and the
+            // restored mask renders empty (all shadows silently gone).
+            // ensureCapacity sizes the array with the texture's own math.
+            const restored = new RgbaArray();
+            restored.ensureCapacity(m.count);
+            restored.array.set(
+              m.bytes.subarray(0, Math.min(m.bytes.length, restored.array.length)),
+            );
+            restored.count = m.count;
+            restored.needsUpdate = true;
+            obj.shadowMask = restored;
             obj.splatMesh.worldModifier = shadowDyno(obj.shadowMask.dyno);
             obj.splatMesh.updateGenerator();
           }
@@ -2505,9 +2521,16 @@
       // Attach the transform gizmo to whichever entity is selected —
       // splat mesh or volume helper. Clears the gizmo when nothing is
       // selected (id === null) so it disappears from the viewport.
+      // In paint modes the gizmo is HIDDEN entirely: it sits at the
+      // selected object's center, and hovering one of its handles makes
+      // pointerdown skip the brush path — strokes near the middle of the
+      // object silently did nothing (or dragged the object instead).
       const splat = getSelected();
       const vol   = getSelectedVolume();
-      if (splat && splat.splatMesh) {
+      if (inPaintMode()) {
+        transformControls.detach();
+        transformHelper.visible = false;
+      } else if (splat && splat.splatMesh) {
         transformControls.attach(splat.splatMesh);
         transformHelper.visible = true;
       } else if (vol && vol.sdfNode) {
@@ -2774,10 +2797,29 @@
       sdfNode.name = `shadow-volume-${type}`;
       sdfNode.add(helperRoot);
 
-      // Place ~3 units in front of the camera so it lands in view.
+      // Land the volume ON the splat surface at the view center. A box
+      // spawned floating in empty air overlaps zero splats, darkens
+      // nothing, and reads as "the shadow tool is broken". Skipped for
+      // silent (restore) adds — their position is overwritten right after.
       const fwd = new THREE.Vector3();
       camera.getWorldDirection(fwd);
-      sdfNode.position.copy(camera.position).addScaledVector(fwd, 3);
+      let snapDist = null;
+      if (!opts.silent) {
+        try {
+          raycaster.set(camera.position, fwd);
+          raycaster.far = Infinity;
+          const hits = [];
+          for (const o of objects) {
+            if (o.splatMesh) o.splatMesh.raycast(raycaster, hits);
+          }
+          for (const h of hits) {
+            if (snapDist === null || h.distance < snapDist) snapDist = h.distance;
+          }
+        } catch (_) { /* fall through to the in-front placement */ }
+      }
+      sdfNode.position
+        .copy(camera.position)
+        .addScaledVector(fwd, snapDist ?? 3);
       sdfNode.scale.setScalar(1.0);
       scene.add(sdfNode);
 
@@ -3236,6 +3278,12 @@
       // rebuild the generator so the renderer picks it up.
       obj.splatMesh.worldModifier = shadowDyno(obj.shadowMask.dyno);
       obj.splatMesh.updateGenerator();
+      // Autosave straight from the source of truth: every actual mask
+      // change (re)schedules the debounced save. The pointerup hook alone
+      // proved unreliable (a stroke that ends off-canvas or gets its
+      // pointerdown swallowed never fired it), and a missed save means
+      // the project reloads with every painted shadow gone.
+      scheduleMaskSave(obj);
     }
 
     const _camWorldUp = new THREE.Vector3();
@@ -4308,6 +4356,9 @@
       canvas.classList.toggle("painting", mode !== "view");
       // Cursor re-appears on the next pointer move if still in a brush mode.
       brushCursor.visible = false;
+      // Re-evaluate gizmo visibility for the new mode (hidden while
+      // painting, restored on the selection when back in orbit mode).
+      syncSelectionState();
       modeButtons.forEach((btn) =>
         btn.classList.toggle("active", btn.dataset.mode === mode),
       );
@@ -4463,6 +4514,7 @@
       showcase, recordShowcase,
       saveMaskNow, saveSceneDoc, setVolumeParent, addVolume,
       THREE, scene, robustBoundsFromSplats, applyVolumeStyle,
+      transformControls,
     };
 
     // Saved projects are OFFERED on the start screen rather than restored
