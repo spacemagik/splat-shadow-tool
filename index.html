@@ -1157,13 +1157,16 @@
       // Driven by the "Shadow strength" slider in the UI:
       //   strength 0   → darkness 1.0 (no effect, fully transparent shadow)
       //   strength 0.5 → darkness 0.5 (very strong shadow per stroke)
-      darkness:        dyno.dynoFloat(0.92),
+      // Default 0.75 (strength 0.25): strong enough that the very first
+      // click visibly darkens — the old 0.92 default made a single stamp
+      // a ~1.5% darken users read as "the brush isn't doing anything".
+      darkness:        dyno.dynoFloat(0.75),
       // Per-stamp deposit amount in [0..1]. Each pointer move blends the
       // shadowed color over the existing splat by `flow * brushWeight`, so
       // low values give an airbrush-style gradual buildup instead of a
       // hard stamp on every event. Combined with distance-based throttling
       // in JS, this gives a smooth, paintable feel.
-      flow:            dyno.dynoFloat(0.18),
+      flow:            dyno.dynoFloat(0.35),
       // Tint temperature (-1..1) — 0 is a neutral darken; positive shifts
       // the shadow cool/blue like ambient skylight, negative shifts it
       // warm/amber like shadows in golden-hour or firelit environments.
@@ -1366,7 +1369,18 @@
       if (!v || !v.sdfNode || !v.edit) return;
       v.edit.softEdge = v.softness;
       const k = Math.max(0, 1 - v.intensity);
-      v.sdfNode.color.setRGB(k, k, k);
+      // Same warm/cool tint as the brush shadows (see shadowDyno), scaled
+      // by the volume's intensity so a zero-strength volume never tints.
+      // TINT_WARM/TINT_COOL are defined a bit below but this only runs at
+      // interaction time, long after module evaluation.
+      const t = PARAMETERS.coolTint.value;
+      const target = t > 0 ? TINT_COOL : TINT_WARM;
+      const amt = Math.abs(t) * v.intensity;
+      v.sdfNode.color.setRGB(
+        Math.min(1, k * (1 + (target.x - 1) * amt)),
+        Math.min(1, k * (1 + (target.y - 1) * amt)),
+        Math.min(1, k * (1 + (target.z - 1) * amt)),
+      );
       v.sdfNode.opacity = 1;
       scheduleSceneSave(); // persist style tweaks (no-op during restore)
     }
@@ -1402,9 +1416,11 @@
     // (200, 80, 30), the blue channel hits its quantization floor very
     // quickly (one rounding step), while red and green keep decreasing —
     // so after enough strokes the relative ratios drift toward green/blue
-    // and the shadow looks tinted. With a mask that's all-equal-channel
-    // when coolTint=0, every channel quantizes uniformly together and
-    // there is no hue drift. (Cool tint deliberately diverges channels.)
+    // and the shadow looks tinted. The mask is always all-equal-channel
+    // (a neutral darkness amount), so every channel quantizes uniformly
+    // together and there is no hue drift. The warm/cool tint is applied
+    // at RENDER time in shadowDyno, scaled by the stored darkness — which
+    // also means the Tint slider retroactively re-colors painted shadows.
     // -----------------------------------------------------------------------
 
     // worldModifier: multiplies the rendered rgb by a per-splat mask.
@@ -1418,8 +1434,18 @@
     // alpha=1 because the bake leaves alpha untouched; only OOB reads
     // return alpha=0) and fall back to an identity multiplier for those
     // synthesized splats so distant LOD geometry just renders unshadowed.
+    // Shadow tint endpoints, shared by the render dyno (brush shadows) and
+    // applyVolumeStyle (shadow boxes/cylinders) so the whole scene shifts
+    // temperature together when the Tint slider moves.
+    const TINT_COOL = new THREE.Vector3(0.72, 0.88, 1.08);
+    const TINT_WARM = new THREE.Vector3(1.04, 0.82, 0.58);
+
     const _identityMaskRgb = dyno.dynoVec3(new THREE.Vector3(1, 1, 1));
     const _half            = dyno.dynoFloat(0.5);
+    const _zeroF           = dyno.dynoFloat(0.0);
+    const _oneF            = dyno.dynoFloat(1.0);
+    const _coolMulDyno     = dyno.dynoVec3(TINT_COOL);
+    const _warmMulDyno     = dyno.dynoVec3(TINT_WARM);
     function shadowDyno(maskDyno) {
       return dyno.dynoBlock(
         { gsplat: dyno.Gsplat },
@@ -1442,7 +1468,26 @@
           const inBounds = dyno.greaterThan(maskA, _half);
           const maskRgb  = dyno.select(inBounds, dyno.vec3(mask4), _identityMaskRgb);
 
-          const newRgb = dyno.mul(rgb, maskRgb);
+          // Tint is applied HERE at render time (not baked into the mask)
+          // so moving the Tint slider retroactively re-colors every shadow
+          // already painted. The mask stores a neutral darkness amount;
+          // the tint's strength scales with how dark the shadow is, so
+          // untouched splats (mask=1) are never tinted.
+          const target = dyno.select(
+            dyno.greaterThan(PARAMETERS.coolTint, _zeroF),
+            _coolMulDyno, _warmMulDyno,
+          );
+          const tintVec = dyno.add(
+            _identityMaskRgb,
+            dyno.mul(
+              dyno.sub(target, _identityMaskRgb),
+              dyno.abs(PARAMETERS.coolTint),
+            ),
+          );
+          const shadowAmt = dyno.sub(_oneF, dyno.swizzle(maskRgb, "r"));
+          const tintMul   = dyno.mix(_identityMaskRgb, tintVec, shadowAmt);
+
+          const newRgb = dyno.mul(dyno.mul(rgb, maskRgb), tintMul);
           gsplat = dyno.combineGsplat({ gsplat, rgb: newRgb });
           return { gsplat };
         },
@@ -1454,10 +1499,6 @@
     // Inside the brush we multiply the mask down (shadow) or push it back
     // toward 1 (undo). Outside the brush the mask is passed through.
     function shadowMaskBakeDyno(packedSplatsDyno, currentMaskDyno) {
-      const coolMul = dyno.dynoVec3(new THREE.Vector3(0.72, 0.88, 1.08));
-      // Warm counterpart: red survives, blue drops — shadows tinted like
-      // ambient bounce light in a warm scene.
-      const warmMul = dyno.dynoVec3(new THREE.Vector3(1.04, 0.82, 0.58));
       const oneVec3 = dyno.dynoVec3(new THREE.Vector3(1.0, 1.0, 1.0));
       const oneVec4 = dyno.dynoVec4(new THREE.Vector4(1.0, 1.0, 1.0, 1.0));
       const ZERO    = dyno.dynoFloat(0.0);
@@ -1505,21 +1546,13 @@
           const depthMask   = dyno.select(inDepth, ONE, ZERO);
           const brushWeight = dyno.mul(radialWeight, depthMask);
 
-          // ---- per-channel shadow multiplier ----------------------------
-          //  tintVec is (1,1,1) when the tint slider sits at 0 (no hue
-          //  shift, uniform darken — mask channels stay equal so
-          //  quantization can't introduce a tint). Positive values diverge
-          //  the channels toward cool skylight blue, negative toward warm
-          //  golden-hour amber, letting painted shadows match the scene's
-          //  ambient light instead of always being neutral black.
-          const target = dyno.select(
-            dyno.greaterThan(PARAMETERS.coolTint, ZERO), coolMul, warmMul,
-          );
-          const tintVec = dyno.add(
-            oneVec3,
-            dyno.mul(dyno.sub(target, oneVec3), dyno.abs(PARAMETERS.coolTint)),
-          );
-          const channelMul3 = dyno.mul(tintVec, PARAMETERS.darkness);
+          // ---- shadow multiplier -----------------------------------------
+          //  The mask deposit is always NEUTRAL (all channels equal): tint
+          //  lives in the render dyno (shadowDyno) instead, which is what
+          //  lets the Tint slider re-color shadows after they're painted.
+          //  Equal channels also mean 8-bit quantization can't introduce
+          //  hue drift over repeated stamps.
+          const channelMul3 = dyno.mul(oneVec3, PARAMETERS.darkness);
           // Pad to vec4 with alpha=1 so multiplying the mask doesn't
           // change the alpha channel of the mask texture.
           const channelMul4 = dyno.extendVec(channelMul3, ONE);
@@ -3935,7 +3968,11 @@
       .name("Edge softness");
     shadowFolder
       .add(PARAMETERS.coolTint, "value", -1.0, 1.0, 0.01)
-      .name("Tint (warm ↔ cool)");
+      .name("Tint (warm ↔ cool)")
+      // Brush shadows pick the new tint up automatically (it's a render
+      // uniform) — volumes bake their color into the SplatEdit SDF, so
+      // restyle them all here.
+      .onChange(() => { for (const v of volumes) applyVolumeStyle(v); });
     shadowFolder.open();
 
     // ---- Shadow volumes folder ------------------------------------------
