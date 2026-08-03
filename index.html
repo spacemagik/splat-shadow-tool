@@ -987,6 +987,9 @@
     <div class="dot"></div>
     <div class="name">Shadow <span>· splat brush</span></div>
   </div>
+  <!-- Build stamp: hover the logo to see which deploy this tab runs.
+       An out-of-date open tab is the #1 cause of "the fix isn't there". -->
+  <script>window.__APP_BUILD = "2026-08-03e";</script>
 
   <!-- Left column: everything scene-content related lives in ONE stack
        (objects on top, shadow volumes directly beneath) so the controls
@@ -1679,6 +1682,12 @@
     // -----------------------------------------------------------------------
     // Three.js / Spark scene setup
     // -----------------------------------------------------------------------
+    // Surface the build stamp: console + logo tooltip. When a user reports
+    // "the fix isn't live", this tells us in one hover whether their tab
+    // is stale.
+    console.info(`Shadow splat brush — build ${window.__APP_BUILD}`);
+    document.getElementById("brand").title = `build ${window.__APP_BUILD}`;
+
     const canvas = document.getElementById("canvas");
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -3574,6 +3583,19 @@
       isDragging = true;
       strokeNeedsSnapshot = true; // new stroke → snapshot mask for Cmd+Z
       updateBrushRay(event);
+      // The brush only paints the SELECTED object. A stroke that misses it
+      // must say WHY instead of silently doing nothing — especially in a
+      // multi-object scene where the user is brushing the ground while a
+      // prop is still selected ("the brush is broken!!"). We only run the
+      // (possibly expensive) all-objects pick on this failure path.
+      if (brushHitDist === null) {
+        const hit = pickObjectAtPointer(event);
+        if (hit?.kind === "splat" && hit.obj.id !== selectedObjectId) {
+          showOverlay(`Brush is over “${hit.obj.name}” — click it in the Objects panel to paint it`, 3200);
+        } else {
+          showOverlay(`Brush isn't over “${getSelected()?.name ?? "the selected object"}” — nothing to paint here`, 3200);
+        }
+      }
       // Drop a single stamp on click and seed the throttler from this spot.
       resetStampTracking(event);
       bakeCurrentRgba();
@@ -4342,11 +4364,11 @@
     // -----------------------------------------------------------------------
     const overlay = document.getElementById("mode-overlay");
     let overlayTimer;
-    function showOverlay(text) {
+    function showOverlay(text, ms = 1400) {
       overlay.textContent = text;
       overlay.classList.add("show");
       clearTimeout(overlayTimer);
-      overlayTimer = setTimeout(() => overlay.classList.remove("show"), 1400);
+      overlayTimer = setTimeout(() => overlay.classList.remove("show"), ms);
     }
 
     const modeButtons = document.querySelectorAll(".mode-btn");
