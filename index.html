@@ -1377,7 +1377,9 @@
       // interaction time, long after module evaluation.
       const t = PARAMETERS.coolTint.value;
       const target = t > 0 ? TINT_COOL : TINT_WARM;
-      const amt = Math.abs(t) * v.intensity;
+      // Same ramp as the brush render dyno so a box and a stroke at the
+      // same darkness carry the same hue.
+      const amt = Math.abs(t) * Math.min(1, v.intensity * TINT_RAMP);
       v.sdfNode.color.setRGB(
         Math.min(1, k * (1 + (target.x - 1) * amt)),
         Math.min(1, k * (1 + (target.y - 1) * amt)),
@@ -1438,9 +1440,16 @@
     // synthesized splats so distant LOD geometry just renders unshadowed.
     // Shadow tint endpoints, shared by the render dyno (brush shadows) and
     // applyVolumeStyle (shadow boxes/cylinders) so the whole scene shifts
-    // temperature together when the Tint slider moves.
-    const TINT_COOL = new THREE.Vector3(0.72, 0.88, 1.08);
-    const TINT_WARM = new THREE.Vector3(1.04, 0.82, 0.58);
+    // temperature together when the Tint slider moves. Tuned like a color
+    // grade rather than a physical model: warm reads as golden-hour amber
+    // (red survives, blue crushed), cool as blue-hour skylight. Earlier,
+    // timid values (e.g. 1.04/0.82/0.58) just greyed the shadow into mud.
+    const TINT_COOL = new THREE.Vector3(0.55, 0.78, 1.30);
+    const TINT_WARM = new THREE.Vector3(1.22, 0.80, 0.42);
+    // How fast the tint ramps in as a shadow darkens. >1 pulls the full
+    // tint into mid-strength shadows instead of only the near-black core
+    // (where multiply has so little signal left the hue barely reads).
+    const TINT_RAMP = 1.6;
 
     const _identityMaskRgb = dyno.dynoVec3(new THREE.Vector3(1, 1, 1));
     const _half            = dyno.dynoFloat(0.5);
@@ -1448,6 +1457,8 @@
     const _oneF            = dyno.dynoFloat(1.0);
     const _coolMulDyno     = dyno.dynoVec3(TINT_COOL);
     const _warmMulDyno     = dyno.dynoVec3(TINT_WARM);
+    const _tintRampDyno    = dyno.dynoFloat(TINT_RAMP);
+    const _lumaDyno        = dyno.dynoVec3(new THREE.Vector3(0.299, 0.587, 0.114));
     function shadowDyno(maskDyno) {
       return dyno.dynoBlock(
         { gsplat: dyno.Gsplat },
@@ -1472,24 +1483,39 @@
 
           // Tint is applied HERE at render time (not baked into the mask)
           // so moving the Tint slider retroactively re-colors every shadow
-          // already painted. The mask stores a neutral darkness amount;
-          // the tint's strength scales with how dark the shadow is, so
-          // untouched splats (mask=1) are never tinted.
+          // already painted. The mask stores a neutral darkness amount.
+          //
+          // The tint works like a colorist's shadow grade, not a filter:
+          // we blend the darkened color toward `luminance * tintColor`.
+          // A pure channel-multiply can only REMOVE light, so on a
+          // strongly colored surface (orange sand has ~zero blue) a cool
+          // multiply could never look blue — it just greyed into mud.
+          // The luminance blend carries real chroma, so cool shadows go
+          // evening-blue and warm ones golden on ANY surface, while
+          // shading detail survives through the luminance term. Untinted
+          // (slider at 0) stays a pure multiplicative darken.
+          const base = dyno.mul(rgb, maskRgb);
           const target = dyno.select(
             dyno.greaterThan(PARAMETERS.coolTint, _zeroF),
             _coolMulDyno, _warmMulDyno,
           );
-          const tintVec = dyno.add(
-            _identityMaskRgb,
-            dyno.mul(
-              dyno.sub(target, _identityMaskRgb),
-              dyno.abs(PARAMETERS.coolTint),
-            ),
+          const graded = dyno.mul(
+            dyno.mul(target, dyno.dot(rgb, _lumaDyno)),
+            maskRgb,
           );
-          const shadowAmt = dyno.sub(_oneF, dyno.swizzle(maskRgb, "r"));
-          const tintMul   = dyno.mix(_identityMaskRgb, tintVec, shadowAmt);
+          // Ramped by how dark the shadow is: untouched splats (mask=1)
+          // are never tinted; mid-strength shadows already carry most of
+          // the hue instead of only the near-black core.
+          const shadowAmt = dyno.clamp(
+            dyno.mul(
+              dyno.sub(_oneF, dyno.swizzle(maskRgb, "r")),
+              _tintRampDyno,
+            ),
+            _zeroF, _oneF,
+          );
+          const amt = dyno.mul(dyno.abs(PARAMETERS.coolTint), shadowAmt);
 
-          const newRgb = dyno.mul(dyno.mul(rgb, maskRgb), tintMul);
+          const newRgb = dyno.mix(base, graded, amt);
           gsplat = dyno.combineGsplat({ gsplat, rgb: newRgb });
           return { gsplat };
         },
