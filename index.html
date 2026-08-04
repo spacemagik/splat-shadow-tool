@@ -993,7 +993,7 @@
   </div>
   <!-- Build stamp: hover the logo to see which deploy this tab runs.
        An out-of-date open tab is the #1 cause of "the fix isn't there". -->
-  <script>window.__APP_BUILD = "2026-08-04a";</script>
+  <script>window.__APP_BUILD = "2026-08-04b";</script>
 
   <!-- Left column: everything scene-content related lives in ONE stack
        (objects on top, shadow volumes directly beneath) so the controls
@@ -1399,7 +1399,12 @@
       v.sdfNode.opacity = 1;
       if (v.tintSdf && v.editTint) {
         v.editTint.softEdge = v.softness;
-        const lift = 0.10 * Math.abs(t) * v.intensity;
+        // Lift grows with intensity so it's never swamped by the multiply:
+        // at max strength the multiply goes fully black, and without a
+        // matching chroma floor the "warm" shadow snapped back to muddy
+        // neutral right when the user cranked it up. (Same idea as
+        // TINT_FLOOR in the brush render dyno.)
+        const lift = Math.abs(t) * (0.05 + 0.13 * v.intensity);
         v.tintSdf.color.setRGB(target.x * lift, target.y * lift, target.z * lift);
         v.tintSdf.opacity = 0;
       }
@@ -1471,6 +1476,13 @@
     // tint into mid-strength shadows instead of only the near-black core
     // (where multiply has so little signal left the hue barely reads).
     const TINT_RAMP = 1.6;
+    // Brightness floor for TINTED shadows (fraction of the tinted
+    // luminance that survives at maximum darkness). Without it, pushing
+    // a shadow darker collapses it to pure black — and black next to a
+    // warm scene reads as muddy/cool, exactly undoing the warm tint at
+    // the intensities where the user wants it most. 0 tint keeps the
+    // pure multiplicative darken (true black stays reachable).
+    const TINT_FLOOR = 0.25;
 
     const _identityMaskRgb = dyno.dynoVec3(new THREE.Vector3(1, 1, 1));
     const _half            = dyno.dynoFloat(0.5);
@@ -1480,6 +1492,9 @@
     const _warmMulDyno     = dyno.dynoVec3(TINT_WARM);
     const _tintRampDyno    = dyno.dynoFloat(TINT_RAMP);
     const _lumaDyno        = dyno.dynoVec3(new THREE.Vector3(0.299, 0.587, 0.114));
+    const _tintFloorVec    = dyno.dynoVec3(
+      new THREE.Vector3(TINT_FLOOR, TINT_FLOOR, TINT_FLOOR),
+    );
     function shadowDyno(maskDyno) {
       return dyno.dynoBlock(
         { gsplat: dyno.Gsplat },
@@ -1520,9 +1535,14 @@
             dyno.greaterThan(PARAMETERS.coolTint, _zeroF),
             _coolMulDyno, _warmMulDyno,
           );
+          // Floored darkness for the graded term: at maximum darkness the
+          // tinted shadow bottoms out at TINT_FLOOR of the tinted luminance
+          // (a dark amber / dark blue) instead of collapsing to black and
+          // losing its hue — see TINT_FLOOR above.
+          const flooredMask = dyno.mix(_tintFloorVec, _identityMaskRgb, maskRgb);
           const graded = dyno.mul(
             dyno.mul(target, dyno.dot(rgb, _lumaDyno)),
-            maskRgb,
+            flooredMask,
           );
           // Ramped by how dark the shadow is: untouched splats (mask=1)
           // are never tinted; mid-strength shadows already carry most of
