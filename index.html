@@ -173,11 +173,15 @@
     .mode-btn[data-mode="shadow"] .dot { color: var(--shadow-mode); background: var(--shadow-mode); }
     .mode-btn[data-mode="undo"]   .dot { color: var(--undo-mode);   background: var(--undo-mode); }
     .mode-btn[data-mode="view"]   .dot { color: var(--orbit-mode);  background: var(--orbit-mode); }
-    .mode-btn[disabled] {
+    /* "locked" is a class, not the native disabled attribute — native
+       disabled swallows clicks entirely, so a locked button could never
+       explain WHY it's locked. The click handler still fires and shows
+       an overlay message. */
+    .mode-btn.locked {
       opacity: 0.35;
       cursor: not-allowed;
     }
-    .mode-btn[disabled]:hover { background: transparent; color: var(--text-mute); }
+    .mode-btn.locked:hover { background: transparent; color: var(--text-mute); }
 
     /* ---------- Toast (mode change feedback) --------------------------- */
     #mode-overlay {
@@ -989,7 +993,7 @@
   </div>
   <!-- Build stamp: hover the logo to see which deploy this tab runs.
        An out-of-date open tab is the #1 cause of "the fix isn't there". -->
-  <script>window.__APP_BUILD = "2026-08-03e";</script>
+  <script>window.__APP_BUILD = "2026-08-04a";</script>
 
   <!-- Left column: everything scene-content related lives in ONE stack
        (objects on top, shadow volumes directly beneath) so the controls
@@ -1374,14 +1378,18 @@
       if (!v || !v.sdfNode || !v.edit) return;
       v.edit.softEdge = v.softness;
       const k = Math.max(0, 1 - v.intensity);
-      // Same warm/cool tint as the brush shadows (see shadowDyno), scaled
-      // by the volume's intensity so a zero-strength volume never tints.
-      // TINT_WARM/TINT_COOL are defined a bit below but this only runs at
-      // interaction time, long after module evaluation.
+      // Same warm/cool tint direction as the brush shadows (see
+      // shadowDyno). TINT_WARM/TINT_COOL/TINT_RAMP are defined a bit
+      // below but this only runs at interaction time, long after module
+      // evaluation. Two components:
+      //   1. MULTIPLY (sdfNode.color): darken, with channels skewed
+      //      toward the tint.
+      //   2. ADD (tintSdf.color): a small luminance lift in the tint's
+      //      chroma — the part a multiply can never do (e.g. blue on
+      //      orange sand). Scaled by |tint| and intensity so neutral
+      //      tint or zero-strength volumes add nothing.
       const t = PARAMETERS.coolTint.value;
       const target = t > 0 ? TINT_COOL : TINT_WARM;
-      // Same ramp as the brush render dyno so a box and a stroke at the
-      // same darkness carry the same hue.
       const amt = Math.abs(t) * Math.min(1, v.intensity * TINT_RAMP);
       v.sdfNode.color.setRGB(
         Math.min(1, k * (1 + (target.x - 1) * amt)),
@@ -1389,6 +1397,12 @@
         Math.min(1, k * (1 + (target.z - 1) * amt)),
       );
       v.sdfNode.opacity = 1;
+      if (v.tintSdf && v.editTint) {
+        v.editTint.softEdge = v.softness;
+        const lift = 0.10 * Math.abs(t) * v.intensity;
+        v.tintSdf.color.setRGB(target.x * lift, target.y * lift, target.z * lift);
+        v.tintSdf.opacity = 0;
+      }
       scheduleSceneSave(); // persist style tweaks (no-op during restore)
     }
 
@@ -1402,6 +1416,10 @@
     // runs at interaction time, long after it's defined.
     function mountVolumeEdit(v) {
       if (!v || !v.edit) return;
+      if (v.editTint && v.editTint.parent !== scene) {
+        v.editTint.parent?.remove(v.editTint);
+        scene.add(v.editTint);
+      }
       if (v.edit.parent === scene) return;
       v.edit.parent?.remove(v.edit);
       scene.add(v.edit);
@@ -2867,6 +2885,29 @@
       });
       edit.sdfs = [sdfNode];   // explicit array — Spark uses this instead of traversing
 
+      // Second, ADDITIVE edit that carries the warm/cool tint chroma into
+      // the volume's shadow. A multiply can only remove light, so on a
+      // strongly colored surface (orange sand ≈ zero blue) a cool tint
+      // could never read blue — this add is what makes the Tint slider
+      // visibly change volume shadows. It needs its OWN SplatEditSdf
+      // (color/opacity live on the SDF node, and the darkening node
+      // already uses them for the multiply); syncVolumes mirrors the
+      // transform every frame. opacity: 0 → adds color only, not alpha.
+      const tintSdf = new SplatEditSdf({
+        type,
+        color: new THREE.Color(0, 0, 0), // (0,0,0) = adds nothing
+        opacity: 0,
+        radius: type === "cylinder" ? 1 : 0,
+      });
+      tintSdf.name = `shadow-volume-tint-${type}`;
+      scene.add(tintSdf);
+      const editTint = new SplatEdit({
+        rgbaBlendMode: "add_rgba",
+        softEdge: DEFAULT_VOLUME_STYLE.softness,
+        sdfSmooth: 0,
+      });
+      editTint.sdfs = [tintSdf];
+
       const id = nextVolumeId++;
       edit.name = `shadow-volume-edit-${id}`;
       const idx = volumes.length;
@@ -2886,6 +2927,8 @@
         id, name, type,
         sdfNode,
         edit,
+        tintSdf,
+        editTint,
         helperRoot,
         intensity: DEFAULT_VOLUME_STYLE.intensity,
         softness:  DEFAULT_VOLUME_STYLE.softness,
@@ -2996,6 +3039,18 @@
           const r = Math.max(0.0001, s.x);
           if (v.sdfNode.radius !== r) v.sdfNode.radius = r;
         }
+
+        // Keep the additive tint SDF glued to the darkening SDF — it's a
+        // separate node (color/opacity are per-node and already used by
+        // the multiply), so mirror the full TRS every frame.
+        if (v.tintSdf) {
+          v.tintSdf.position.copy(v.sdfNode.position);
+          v.tintSdf.quaternion.copy(v.sdfNode.quaternion);
+          v.tintSdf.scale.copy(v.sdfNode.scale);
+          if (v.type === "cylinder" && v.tintSdf.radius !== v.sdfNode.radius) {
+            v.tintSdf.radius = v.sdfNode.radius;
+          }
+        }
       }
     }
 
@@ -3010,6 +3065,8 @@
         transformHelper.visible = false;
       }
       v.edit?.parent?.remove(v.edit);
+      v.editTint?.parent?.remove(v.editTint);
+      v.tintSdf?.parent?.remove(v.tintSdf);
       v.sdfNode.parent?.remove(v.sdfNode);
       v.sdfNode.traverse((node) => {
         if (node.geometry) node.geometry.dispose();
@@ -4379,9 +4436,23 @@
       // indexes line up with the rendered splats; this is what makes the
       // brush actually paint the splats the user clicks on.
       if (mode === "shadow" || mode === "undo") {
-        const sel = getSelected();
+        let sel = getSelected();
+        // No object selected (e.g. a shadow BOX is selected, which clears
+        // the object selection) → don't dead-end; auto-select a paintable
+        // object so entering brush mode ALWAYS works when objects exist.
+        // This was the top silent "brush is broken" trap.
         if (!sel) {
-          showOverlay("Select an object first");
+          const candidate = objects.find(
+            (o) => o.splatMesh && !isLodBuiltMesh(o.splatMesh),
+          ) ?? objects.find((o) => o.splatMesh);
+          if (candidate) {
+            selectObject(candidate.id);
+            sel = getSelected();
+            showOverlay(`Painting “${candidate.name}”`, 2200);
+          }
+        }
+        if (!sel) {
+          showOverlay("Load a splat first — drop a .spz file anywhere", 3200);
           return;
         }
         // Same lock the UI buttons enforce — hotkeys 1/2 must not slip
@@ -4420,27 +4491,35 @@
       // per-splat shadow mask can't address them — painting is off
       // until the user turns LOD off (which reloads the meshes).
       const lodLocked = !!sel?.splatMesh && isLodBuiltMesh(sel.splatMesh);
+      // Locked = visual hint only. Clicks still land in setMode, which
+      // either auto-selects a paintable object or explains the block —
+      // a paint button must never ignore a click silently.
+      const noObjects = !objects.some((o) => o.splatMesh);
       modeButtons.forEach((btn) => {
         const m = btn.dataset.mode;
         const isPaint = m === "shadow" || m === "undo";
-        const disabled = isPaint && (noSelection || lodLocked);
-        btn.toggleAttribute("disabled", disabled);
-        btn.title = !isPaint || !disabled
+        const locked = isPaint && (noObjects || lodLocked);
+        btn.classList.toggle("locked", locked);
+        btn.title = !isPaint || !locked
           ? ""
           : (lodLocked
             ? "Turn LOD off (Scene panel) to paint this object"
-            : "Select an object to paint on");
+            : "Load a splat first");
       });
       // If we're currently in a paint mode but the selection has been
-      // cleared, fall back to view.
+      // cleared (e.g. the user clicked a shadow box row), fall back to
+      // view — and SAY so, otherwise the next brush drag orbits the
+      // camera and the brush feels broken.
       if (noSelection
           && (PARAMETERS.shadowEnabled.value || PARAMETERS.undoEnabled.value)) {
         setMode("view");
+        showOverlay("Left brush mode — press 1 or the Shadow button to paint again", 3200);
       }
     }
     modeButtons.forEach((btn) =>
       btn.addEventListener("click", () => {
-        if (btn.hasAttribute("disabled")) return;
+        // No silent ignore: setMode itself gates and explains (auto-select,
+        // "Load a splat first", "Turn LOD off", ...).
         setMode(btn.dataset.mode);
       }),
     );
