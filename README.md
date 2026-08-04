@@ -85,6 +85,11 @@ Each volume is a normal scene object, so the same gizmo lets you
 Splats that fall inside the volume get darkened with a smooth SDF
 falloff — darkest at the center, fading to no effect at the edge.
 
+Volumes are evaluated in the **same shader as the brush**, so a box and
+a brush stroke at equal strength produce exactly the same color —
+including the warm/cool Tint grade, which re-colors volumes and brush
+shadows together, live.
+
 **Only the selected volume shows its wireframe.** Splats don't write to
 the depth buffer, so a wireframe can never be hidden behind the ground —
 an always-visible helper would draw "through" the whole scene. Deselect
